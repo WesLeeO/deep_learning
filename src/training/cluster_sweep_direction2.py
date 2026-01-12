@@ -88,23 +88,8 @@ def make_pes(model_cfg: ModelConfig, board_cfg: BoardConfig):
             LearnedPositionalEncoding1D(model_cfg.d_model, board_cfg.H * board_cfg.W),
         ),
         (
-            "abs_1d_sinusoidal",
-            SinusoidalPositionalEncoding(model_cfg.d_model, model_cfg.max_len),
-        ),
-        (
             "abs_2d_learned",
             LearnedPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
-        ),
-        (
-            "abs_2d_sin+rel_2d_bias",
-            Abs2DPlusRelBias2D(
-                abs_pe=SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
-                rel_bias=RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
-            ),
-        ),
-        (
-            "abs_2d_sinusoidal",
-            SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
         ),
         (
             "rel_2d_bias",
@@ -192,13 +177,16 @@ def inject_rollout_noise_inplace(
     """
     Flip-digit noise on already-written result/carry cells for steps < step_idx.
     Triggered with prob p_noise per rollout iteration.
+    Returns: list[int] positions that were corrupted (may be empty).
     """
+
+    corrupted_positions = []
     if p_noise <= 0.0 or step_idx <= 0:
-        return
+        return corrupted_positions
 
     u = torch.rand((), generator=rng, device=board.device).item()
     if u > p_noise:
-        return
+        return corrupted_positions
 
     W = cfg.W
     cand = []
@@ -213,7 +201,7 @@ def inject_rollout_noise_inplace(
             cand.append(cfg.carry_row * W + c_car)
 
     if not cand:
-        return
+        return corrupted_positions
 
     for _ in range(n_noise):
         j = int(torch.randint(0, len(cand), (1,), generator=rng, device=board.device).item())
@@ -225,6 +213,16 @@ def inject_rollout_noise_inplace(
         else:
             new = int(torch.randint(0, 10, (1,), generator=rng, device=board.device).item())
         board[pos] = new
+        corrupted_positions.append(pos)
+
+    return corrupted_positions
+
+
+def result_positions(cfg: BoardConfig) -> torch.Tensor:
+    # result digits are the last n_digits columns in the result row
+    cols = list(range(cfg.W - cfg.n_digits, cfg.W))
+    idxs = [cfg.result_row * cfg.W + c for c in cols]
+    return torch.tensor(idxs, dtype=torch.long)
 
 
 @torch.no_grad()
@@ -236,13 +234,15 @@ def rollout_one(
     p_noise: float,
     seed: int,
     max_iters: int = 400,
-) -> torch.Tensor:
+):
     device = next(model.parameters()).device
     rng_torch = torch.Generator(device=device)
     rng_torch.manual_seed(seed)
 
-    S_seq, _ = generate_trajectory_variant_A(cfg, xs)
+    S_seq, _ = generate_trajectory_variant_A(cfg, xs)  # teacher trajectory
     board = torch.from_numpy(S_seq[0]).view(-1).long().to(device)
+
+    recovery_events = []  # [(pos, correct_token), ...]  <-- NEW
 
     t = 0
     iters = 0
@@ -252,7 +252,14 @@ def rollout_one(
     while t < cfg.n_digits and iters < max_iters:
         iters += 1
 
-        inject_rollout_noise_inplace(board, cfg, t, rng_torch, p_noise=p_noise, n_noise=1)
+        # --- NEW: inject noise AND record "what should it be"
+        corrupted_positions = inject_rollout_noise_inplace(
+            board, cfg, t, rng_torch, p_noise=p_noise, n_noise=1
+        )
+        if corrupted_positions:
+            teacher_flat_t = S_seq[t].reshape(-1)  # correct board at step pointer t
+            for pos in corrupted_positions:
+                recovery_events.append((pos, int(teacher_flat_t[pos])))
 
         out = model(board.unsqueeze(0))
         logits = out[0] if isinstance(out, (tuple, list)) else out
@@ -307,37 +314,77 @@ def rollout_one(
 
         raise ValueError(f"Unknown setting: {setting}")
 
-    return board.cpu()
+    finished = (t >= cfg.n_digits)  # <-- NEW
+    return board.cpu(), recovery_events, finished
+
 
 
 @torch.no_grad()
-def rollout_accuracy(
+def rollout_metrics(
     model: torch.nn.Module,
     cfg: BoardConfig,
     problems,
     setting: str,
     p_noise: float,
     seed: int,
-) -> float:
-    n_ok = 0
+):
+    rp = result_positions(cfg)
+
+    n_ok_exact = 0
+    digit_correct = 0
+    digit_total = 0
+
+    n_inj = 0
+    n_fixed = 0
+
+    n_finished = 0
+
     for i, pr in enumerate(problems):
         xs = pr.operands
         S_seq, _ = generate_trajectory_variant_A(cfg, xs)
         target_final = torch.from_numpy(S_seq[-1]).view(-1).long()
 
-        pred_final = rollout_one(
+        pred_final, recovery_events, finished = rollout_one(
             model=model,
             cfg=cfg,
             xs=xs,
             setting=setting,
             p_noise=p_noise,
             seed=seed + i,
+            max_iters=400,
         )
 
-        if torch.equal(pred_final, target_final):
-            n_ok += 1
+        if finished:
+            n_finished += 1
 
-    return n_ok / len(problems)
+        # exact full-board
+        if torch.equal(pred_final, target_final):
+            n_ok_exact += 1
+
+        # digit accuracy (result row digits)
+        digit_correct += (pred_final[rp] == target_final[rp]).sum().item()
+        digit_total += rp.numel()
+
+        # recovery rate
+        for (pos, correct_tok) in recovery_events:
+            n_inj += 1
+            if int(pred_final[pos].item()) == int(correct_tok):
+                n_fixed += 1
+
+    exact_acc = n_ok_exact / len(problems)
+    digit_acc = digit_correct / max(digit_total, 1)
+    recovery_rate = (n_fixed / n_inj) if n_inj > 0 else float("nan")
+    finish_rate = n_finished / len(problems)
+
+    return {
+        "exact_acc": exact_acc,
+        "digit_acc": digit_acc,
+        "recovery_rate": recovery_rate,
+        "finish_rate": finish_rate,
+        "n_injected": n_inj,
+    }
+
+
 
 
 # -------------------------
@@ -477,7 +524,8 @@ def build_model_with_state(
 # -------------------------
 def plot_grouped_bars(out_path: str, pe_names: List[str],
                       classic_vals: List[float], local_vals: List[float], global_vals: List[float],
-                      title: str):
+                      title: str,
+                      ylabel: str):
     x = np.arange(len(pe_names))
     width = 0.25
 
@@ -522,14 +570,14 @@ def main():
     p.add_argument(
         "--train-sizes",
         type=str,
-        default="10000,20000,40000,80000,120000,160000,200000",
+        default="40000",
     )
     p.add_argument("--n-val", type=int, default=10000)
 
-    # task (8 digits)
-    p.add_argument("--n-digits", type=int, default=8)
+    # task (5 digits)
+    p.add_argument("--n-digits", type=int, default=5)
     p.add_argument("--H", type=int, default=4)
-    p.add_argument("--W", type=int, default=10)  # must satisfy W >= n_digits + 2
+    p.add_argument("--W", type=int, default=7)  # must satisfy W >= n_digits + 2
 
     # train hyperparams
     p.add_argument("--batch-size", type=int, default=64)
@@ -565,10 +613,9 @@ def main():
     # model configs (same as blackboard.py)
     model_cfgs = [
         ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
-        ModelConfig(d_model=64,  nhead=2, num_layers=3, dim_feedforward=256, dropout=0.1, max_len=200),
         ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
-        ModelConfig(d_model=128, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
         ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
+        ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
     ]
 
     def stable_seed(tag: str) -> int:
@@ -600,8 +647,12 @@ def main():
             pe_names = [name for name, _ in pe_list]
 
             # collect rollout accuracies for bar plots
-            acc_noise0 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
-            acc_noise1 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
+            exact0 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
+            digit0 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
+
+            exact1 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
+            digit1 = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
+            reco1  = {pe: {"classic": 0.0, "local": 0.0, "global": 0.0} for pe in pe_names}
 
             # per-PE summary table
             rows = []
@@ -659,10 +710,15 @@ def main():
                 )
 
                 model_c = build_model_with_state(device, model_cfg, board_cfg, pe_name, 12, state_c)
-                a0_c = rollout_accuracy(model_c, board_cfg, test_problems, "classic", p_noise=0.0, seed=args.seed + 12345)
-                a1_c = rollout_accuracy(model_c, board_cfg, test_problems, "classic", p_noise=args.noise_p, seed=args.seed + 54321)
-                acc_noise0[pe_name]["classic"] = a0_c
-                acc_noise1[pe_name]["classic"] = a1_c
+                m0_c = rollout_metrics(model_c, board_cfg, test_problems, "classic", p_noise=0.0,         seed=args.seed + 12345)
+                m1_c = rollout_metrics(model_c, board_cfg, test_problems, "classic", p_noise=args.noise_p, seed=args.seed + 54321)
+
+                exact0[pe_name]["classic"] = m0_c["exact_acc"]
+                digit0[pe_name]["classic"] = m0_c["digit_acc"]
+
+                exact1[pe_name]["classic"] = m1_c["exact_acc"]
+                digit1[pe_name]["classic"] = m1_c["digit_acc"]
+                reco1[pe_name]["classic"]  = m1_c["recovery_rate"]
 
                 # ---- LOCAL (vocab=13) ----
                 pe_l = dict(make_pes(model_cfg, board_cfg))[pe_name]
@@ -715,10 +771,15 @@ def main():
                 )
 
                 model_l = build_model_with_state(device, model_cfg, board_cfg, pe_name, 13, state_l)
-                a0_l = rollout_accuracy(model_l, board_cfg, test_problems, "local", p_noise=0.0, seed=args.seed + 12345)
-                a1_l = rollout_accuracy(model_l, board_cfg, test_problems, "local", p_noise=args.noise_p, seed=args.seed + 54321)
-                acc_noise0[pe_name]["local"] = a0_l
-                acc_noise1[pe_name]["local"] = a1_l
+                m0_l = rollout_metrics(model_l, board_cfg, test_problems, "local", p_noise=0.0,          seed=args.seed + 12345)
+                m1_l = rollout_metrics(model_l, board_cfg, test_problems, "local", p_noise=args.noise_p, seed=args.seed + 54321)
+
+                exact0[pe_name]["local"] = m0_l["exact_acc"]
+                digit0[pe_name]["local"] = m0_l["digit_acc"]
+
+                exact1[pe_name]["local"] = m1_l["exact_acc"]
+                digit1[pe_name]["local"] = m1_l["digit_acc"]
+                reco1[pe_name]["local"]  = m1_l["recovery_rate"]
 
                 # ---- GLOBAL (vocab=13) ----
                 pe_g = dict(make_pes(model_cfg, board_cfg))[pe_name]
@@ -771,10 +832,15 @@ def main():
                 )
 
                 model_g = build_model_with_state(device, model_cfg, board_cfg, pe_name, 13, state_g)
-                a0_g = rollout_accuracy(model_g, board_cfg, test_problems, "global", p_noise=0.0, seed=args.seed + 12345)
-                a1_g = rollout_accuracy(model_g, board_cfg, test_problems, "global", p_noise=args.noise_p, seed=args.seed + 54321)
-                acc_noise0[pe_name]["global"] = a0_g
-                acc_noise1[pe_name]["global"] = a1_g
+                m0_g = rollout_metrics(model_g, board_cfg, test_problems, "global", p_noise=0.0,          seed=args.seed + 12345)
+                m1_g = rollout_metrics(model_g, board_cfg, test_problems, "global", p_noise=args.noise_p, seed=args.seed + 54321)
+
+                exact0[pe_name]["global"] = m0_g["exact_acc"]
+                digit0[pe_name]["global"] = m0_g["digit_acc"]
+
+                exact1[pe_name]["global"] = m1_g["exact_acc"]
+                digit1[pe_name]["global"] = m1_g["digit_acc"]
+                reco1[pe_name]["global"]  = m1_g["recovery_rate"]
 
                 # one row per PE containing the 3 settings (makes plotting / reading easy)
                 rows.append(
@@ -783,20 +849,23 @@ def main():
                         "n_train": n_train,
                         "pe": pe_name,
 
-                        "classic_best_val_masked_acc": info_c["best_val_masked_acc"],
-                        "classic_best_epoch": info_c["best_epoch"],
-                        "classic_rollout_acc_noise0": a0_c,
-                        f"classic_rollout_acc_noise{args.noise_p}": a1_c,
+                        "classic_exact_noise0": m0_c["exact_acc"],
+                        f"classic_exact_noise{args.noise_p}": m1_c["exact_acc"],
+                        "classic_digit_noise0": m0_c["digit_acc"],
+                        f"classic_digit_noise{args.noise_p}": m1_c["digit_acc"],
+                        f"classic_recovery_noise{args.noise_p}": m1_c["recovery_rate"],
 
-                        "local_best_val_masked_acc": info_l["best_val_masked_acc"],
-                        "local_best_epoch": info_l["best_epoch"],
-                        "local_rollout_acc_noise0": a0_l,
-                        f"local_rollout_acc_noise{args.noise_p}": a1_l,
+                        "local_exact_noise0": m0_l["exact_acc"],
+                        f"local_exact_noise{args.noise_p}": m1_l["exact_acc"],
+                        "local_digit_noise0": m0_l["digit_acc"],
+                        f"local_digit_noise{args.noise_p}": m1_l["digit_acc"],
+                        f"local_recovery_noise{args.noise_p}": m1_l["recovery_rate"],
 
-                        "global_best_val_masked_acc": info_g["best_val_masked_acc"],
-                        "global_best_epoch": info_g["best_epoch"],
-                        "global_rollout_acc_noise0": a0_g,
-                        f"global_rollout_acc_noise{args.noise_p}": a1_g,
+                        "global_exact_noise0": m0_g["exact_acc"],
+                        f"global_exact_noise{args.noise_p}": m1_g["exact_acc"],
+                        "global_digit_noise0": m0_g["digit_acc"],
+                        f"global_digit_noise{args.noise_p}": m1_g["digit_acc"],
+                        f"global_recovery_noise{args.noise_p}": m1_g["recovery_rate"],
                     }
                 )
 
@@ -804,31 +873,63 @@ def main():
                 write_csv(os.path.join(run_dir, "results.csv"), rows)
 
             # bar plots for THIS (model_cfg, n_train) folder
-            classic0 = [acc_noise0[pe]["classic"] for pe in pe_names]
-            local0   = [acc_noise0[pe]["local"] for pe in pe_names]
-            global0  = [acc_noise0[pe]["global"] for pe in pe_names]
+            def extract(metric_dict, key):
+                return [metric_dict[pe][key] for pe in pe_names]
 
-            classic1 = [acc_noise1[pe]["classic"] for pe in pe_names]
-            local1   = [acc_noise1[pe]["local"] for pe in pe_names]
-            global1  = [acc_noise1[pe]["global"] for pe in pe_names]
-
+            # --- EXACT (noise=0.0)
             plot_grouped_bars(
-                out_path=os.path.join(run_dir, "barplot_noise0.png"),
+                out_path=os.path.join(run_dir, "barplot_exact_noise0.png"),
                 pe_names=pe_names,
-                classic_vals=classic0,
-                local_vals=local0,
-                global_vals=global0,
-                title=f"{cfg_name} | n_train={n_train} | rollout acc (noise=0.0) | n_test={args.n_test}",
+                classic_vals=extract(exact0, "classic"),
+                local_vals=extract(exact0, "local"),
+                global_vals=extract(exact0, "global"),
+                title=f"{cfg_name} | n_train={n_train} | exact final-board acc (noise=0.0) | n_test={args.n_test}",
+                ylabel="Rollout exact accuracy",
             )
 
+            # --- DIGIT ACC (noise=0.0)
             plot_grouped_bars(
-                out_path=os.path.join(run_dir, f"barplot_noise{args.noise_p}.png"),
+                out_path=os.path.join(run_dir, "barplot_digit_noise0.png"),
                 pe_names=pe_names,
-                classic_vals=classic1,
-                local_vals=local1,
-                global_vals=global1,
-                title=f"{cfg_name} | n_train={n_train} | rollout acc (noise={args.noise_p}, flip-digit) | n_test={args.n_test}",
+                classic_vals=extract(digit0, "classic"),
+                local_vals=extract(digit0, "local"),
+                global_vals=extract(digit0, "global"),
+                title=f"{cfg_name} | n_train={n_train} | result digit accuracy (noise=0.0) | n_test={args.n_test}",
+                ylabel="Rollout digit accuracy",
             )
+
+            # --- EXACT (noise=args.noise_p)
+            plot_grouped_bars(
+                out_path=os.path.join(run_dir, f"barplot_exact_noise{args.noise_p}.png"),
+                pe_names=pe_names,
+                classic_vals=extract(exact1, "classic"),
+                local_vals=extract(exact1, "local"),
+                global_vals=extract(exact1, "global"),
+                title=f"{cfg_name} | n_train={n_train} | exact final-board acc (noise={args.noise_p}) | n_test={args.n_test}",
+                ylabel="Rollout exact accuracy",
+            )
+
+            # --- DIGIT ACC (noise=args.noise_p)
+            plot_grouped_bars(
+                out_path=os.path.join(run_dir, f"barplot_digit_noise{args.noise_p}.png"),
+                pe_names=pe_names,
+                classic_vals=extract(digit1, "classic"),
+                local_vals=extract(digit1, "local"),
+                global_vals=extract(digit1, "global"),
+                title=f"{cfg_name} | n_train={n_train} | result digit accuracy (noise={args.noise_p}) | n_test={args.n_test}",
+                ylabel="Rollout digit accuracy",)
+
+            # --- RECOVERY RATE (only meaningful with noise)
+            plot_grouped_bars(
+                out_path=os.path.join(run_dir, f"barplot_recovery_noise{args.noise_p}.png"),
+                pe_names=pe_names,
+                classic_vals=extract(reco1, "classic"),
+                local_vals=extract(reco1, "local"),
+                global_vals=extract(reco1, "global"),
+                title=f"{cfg_name} | n_train={n_train} | recovery rate (noise={args.noise_p}) | n_test={args.n_test}",
+                ylabel="Rollout recovery rate",
+                )
+
 
             dt = time.time() - t0
             with open(os.path.join(run_dir, "done.json"), "w", encoding="utf-8") as f:
