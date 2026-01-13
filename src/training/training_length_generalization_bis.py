@@ -162,11 +162,9 @@ def main():
 
     n_train_problems_total = 500_000
     n_val_problems = 20_000
-    n_train_problems_total = 20
-    n_val_problems = 20
-    batch_size = 512
+ 
+    batch_size = 1024
     num_epochs = 8
-    num_epochs = 1
     lr = 3e-4
 
     d_model = 128

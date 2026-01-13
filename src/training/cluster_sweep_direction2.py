@@ -563,14 +563,14 @@ def main():
 
     p = argparse.ArgumentParser()
 
-    p.add_argument("--out-dir", type=str, default="cluster_direction2_outputs")
+    p.add_argument("--out-dir", type=str, default="cluster_direction2_outputs2")
     p.add_argument("--seed", type=int, default=42)
 
     # sweep
     p.add_argument(
         "--train-sizes",
         type=str,
-        default="40000",
+        default="100000",
     )
     p.add_argument("--n-val", type=int, default=10000)
 
@@ -580,7 +580,7 @@ def main():
     p.add_argument("--W", type=int, default=7)  # must satisfy W >= n_digits + 2
 
     # train hyperparams
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=3e-4)
 
@@ -612,10 +612,10 @@ def main():
 
     # model configs (same as blackboard.py)
     model_cfgs = [
-        ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
-        ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
+      #  ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
+      #  ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
         ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
-        ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
+      #  ModelConfig(d_model=512, nhead=4, num_layers=6, dim_feedforward=512, dropout=0.1, max_len=200),
     ]
 
     def stable_seed(tag: str) -> int:

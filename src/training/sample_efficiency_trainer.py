@@ -202,9 +202,8 @@ def main():
     num_layers = 3
     dim_feedforward = 512
     dropout = 0.1
-    batch_size = 512
+    batch_size = 128
     num_epochs = 10            
-    num_epochs = 1
     lr = 3e-4
 
     # -------------------------------
@@ -253,8 +252,10 @@ def main():
 
     max_train_setting1 = 40000
     n_test_setting1 = 40000
+    """
     max_train_setting1 = 10
     n_test_setting1 = 10
+    """
     seed_base = 0
 
     frac_values = [0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0]
@@ -375,8 +376,7 @@ def main():
 
     n_train_setting2 = 30000
     n_test_setting2 = 30000
-    n_train_setting2 = 10
-    n_test_setting2 = 10
+  
     seed_setting2 = 42
 
     frac_pos_values = [i / 10.0 for i in range(1, 10)]  # 0.1..0.9
@@ -448,8 +448,7 @@ def main():
 
     n_train_setting3 = 40000
     n_test_setting3 = 40000
-    n_train_setting3 = 10
-    n_test_setting3 = 10
+
     seed_setting3 = 123
 
     # UPDATED generate_setting3_order_constraint returns (train, test, B_by_cin, Ptrain_by_cin, Ptest_by_cin)
@@ -508,8 +507,7 @@ def main():
 
     n_train_setting4 = 40000
     n_test_setting4 = 40000
-    n_train_setting4 = 10
-    n_test_setting4 = 10
+ 
     seed_setting4 = 999
 
     train4, test4, _B4, _H4 = generate_setting4_triplet_holdout(
@@ -560,8 +558,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-#TODO change nb of epochs and nb train/test
-
-
-#logique que abs 2d doit meilleur ptet, avec ABS+REL; pour setting 2, rel devrait être mieux, pour 4 personne 
