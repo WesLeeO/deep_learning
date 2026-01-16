@@ -42,7 +42,7 @@ The `src/training` folder contains scripts for the main experimental families:
 
 ## Running a training script
 
-Most experiments are run as Python modules. Example commands:
+Experiments are run as Python modules. Example commands:
 
 ```bash
 python -m src.training.blackboard
