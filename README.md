@@ -7,7 +7,7 @@
 * `src/training`: experiment scripts that train on blackboard or CoT data, including
   generalization, transfer, sample/weight efficiency, denoising, and mechanistic
   interpretability runs.  
-* `models`: default output directory for saved checkpoints plots corresponding to Phase 0
+* `models`: default output directory for saved checkpoints plots corresponding to Phase 0 of the paper
 
 ## Setup
 
