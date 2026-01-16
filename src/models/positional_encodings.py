@@ -275,6 +275,9 @@ pos_enc = Abs2DPlusRelBias2D(
 model = BlackboardTransformer(vocab_size=vocab, d_model=d_model, nhead=nhead, pos_enc=pos_enc)
 """
 
+# ---------------------------------------------------------------------------
+# Combined absolute 2D PE + relative 2D position bias
+# ---------------------------------------------------------------------------
 class Abs2DPlusRelBias2D(nn.Module):
     """
     Combine absolute 2D positional encoding (added to x)

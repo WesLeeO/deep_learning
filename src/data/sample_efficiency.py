@@ -795,5 +795,5 @@ if __name__ == "__main__":
 
 #setting 1 tests nb of samples needed to generaliye
 #setting 2 tests how able to generalise to tripplets appearing in different cols from train/test
-#settign 3 tests if can generalise from permutation of cols (ie carry,a ,b becomes carry,b,a)
-#last tests generalisation to unseen tripplets (probably the hardest)
+#settign 3 tests if can generalise from permutation of cols (ie carry,a ,b becomes carr,b,a)
+#setting 4 tests generalisation to unseen tripplets (probably the hardest, none should generalise)
