@@ -34,7 +34,7 @@ The `src/training` folder contains scripts for the main experimental families:
   scripts under `src/training/` (e.g.,
   `multi_addition_grid_transfer_all_pes.py`, `multi_addition_grid_transfer_dif_heads.py`,
   `subtraction_transfer_all_pes.py`, `subtraction_transfer_dif_heads.py`).  
-* **Efficiency studies**: `sample_efficiency_trainer.py` and `weight_efficiency.py`.  
+* **Efficiency studies**: `sample_efficiency_trainer.py`. 
 * **Denoising/backtracking variant**: `blackboard_denoising.py` implements the denoising
   objective described in the code comments.  
 * **Mechanistic interpretability**: `mechanistic_interpretability.py` generates attention
