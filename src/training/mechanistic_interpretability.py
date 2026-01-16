@@ -1,5 +1,3 @@
-# vis_attention.py
-
 import os
 from typing import List, Tuple, Optional, Dict
 
@@ -10,20 +8,25 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 
-from src.data.addition_algo import BoardConfig, generate_trajectory
+from src.data.addition_algo import BoardConfig, generate_trajectory_variant_A
 from src.data.problems import generate_diversified_problems
 from src.data.board_dataset import BlackboardAdditionStepDataset
-from src.models.blackboard_transformer import BlackboardTransformer
+from src.models.transformers import BlackboardTransformer
 from src.models.positional_encodings import (
-    RelativePositionBias2D,
     SinusoidalPositionalEncoding,
-    AbsolutePositionalEncoding2D,
+    LearnedPositionalEncoding1D,
+    SinusoidalPositionalEncoding2D,
+    LearnedPositionalEncoding2D,
+    RelativePositionBias2D,
+    Abs2DPlusRelBias2D,
+    RotaryPositionalEmbedding1D
+
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CHECKPOINT_DIR = "src/training/trained_weights"
-OUTPUT_DIR = "attn_viz_4head_4layers"
+OUTPUT_DIR = "attn_viz_1head_3layers_all_PEs"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -79,18 +82,34 @@ def accuracy_with_splits(
 
 def build_blackboard_model(pe_key: str, cfg: BoardConfig) -> BlackboardTransformer:
     d_model = 128
-    n_heads = 4
-    num_layers = 4
+    n_heads = 3
+    num_layers = 3
     dim_feedforward = 512
     max_len = cfg.H * cfg.W
     vocab_size = 12
 
+
+
+
     if pe_key == "relative_pe":
         pos_enc = RelativePositionBias2D(n_heads, cfg.H, cfg.W)
-    elif pe_key == "sinusoidal_pe":
+    elif pe_key == "abs_1d_sinusoidal":
         pos_enc = SinusoidalPositionalEncoding(d_model, max_len=max_len)
-    elif pe_key == "absolute_pe":
-        pos_enc = AbsolutePositionalEncoding2D(d_model, cfg.H, cfg.W)
+    elif pe_key == "abs_2d_sinusoidal":
+        pos_enc = SinusoidalPositionalEncoding2D(d_model, cfg.H, cfg.W)
+
+    elif pe_key == "abs_1d_learned":
+        pos_enc = LearnedPositionalEncoding1D(d_model, cfg.H * cfg.W)
+    elif pe_key == "abs_2d_learned":
+        pos_enc = LearnedPositionalEncoding2D(d_model, cfg.H , cfg.W)
+
+    elif pe_key == "abs_2d_sin+rel_2d_bias":
+        pos_enc = Abs2DPlusRelBias2D(
+            abs_pe=SinusoidalPositionalEncoding2D(d_model, cfg.H, cfg.W),
+            rel_bias=RelativePositionBias2D(n_heads=n_heads, H=cfg.H, W=cfg.W),
+        )
+
+
     else:
         raise ValueError(f"Unknown PE key: {pe_key}")
 
@@ -108,18 +127,24 @@ def build_blackboard_model(pe_key: str, cfg: BoardConfig) -> BlackboardTransform
     return model
 
 
+
+
 def train_or_load_models(TRAIN: bool, cfg: BoardConfig) -> Dict[str, BlackboardTransformer]:
-    pe_keys = ["relative_pe",
-            # "sinusoidal_pe",
-            # "absolute_pe"
+    pe_keys = [
+            "relative_pe",
+            "abs_1d_sinusoidal",
+            "abs_2d_sinusoidal",
+            "abs_1d_learned",
+            "abs_2d_learned",
+            "abs_2d_sin+rel_2d_bias",
             ]
 
     models: Dict[str, BlackboardTransformer] = {}
 
-    n_train_problems = 200_000 #500_000
+    n_train_problems = 500_000
     n_val_problems = 5_000
     batch_size = 64
-    num_epochs = 2
+    num_epochs = 3
     lr = 3e-4
 
     if TRAIN:
@@ -339,7 +364,7 @@ def plot_attention_grid(
     fig, axes = plt.subplots(
         num_layers,
         n_heads,
-        figsize=(3 * n_heads, 3 * num_layers),
+        figsize=(12, 3.2 * num_layers),
         squeeze=False,
     )
 
@@ -372,10 +397,12 @@ def plot_attention_grid(
             ax.set_title(f"L{layer_idx} H{head_idx}")
 
     fig.suptitle(title)
-    fig.tight_layout()
+
+    fig.tight_layout(rect=[0.0, 0.0, 0.86, 0.92])
     fig.subplots_adjust(top=0.92)
 
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+
+    cbar_ax = fig.add_axes([0.89, 0.15, 0.02, 0.7]) 
     fig.colorbar(im, cax=cbar_ax)
 
     fig.savefig(out_path, dpi=150)
@@ -388,7 +415,7 @@ def visualize_attention(models: Dict[str, BlackboardTransformer], cfg: BoardConf
     for pe_key, model in models.items():
         model.eval()
         for ex_name, xs in examples:
-            S_seq, M_seq = generate_trajectory(cfg, xs)
+            S_seq, M_seq = generate_trajectory_variant_A(cfg, xs)
 
             step = cfg.n_digits - 1
             S_t = S_seq[step]
@@ -417,7 +444,7 @@ def visualize_attention(models: Dict[str, BlackboardTransformer], cfg: BoardConf
 def main():
     cfg = BoardConfig(H=4, W=5, n_digits=3)
 
-    TRAIN = True  
+    TRAIN = True  # Set to True to train models, False to load existing checkpoints
 
     models = train_or_load_models(TRAIN, cfg)
     visualize_attention(models, cfg)
