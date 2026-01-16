@@ -27,18 +27,18 @@ The `src/training` folder contains scripts for the main experimental families:
   transformers on stepwise arithmetic.  
 * **Chain-of-Thought baseline**: `src/training/cot.py` trains 1D CoT transformers for
   comparison.  
-* **Length/generalization studies**: `src/training/training_length_generalization.py`,
+* **Length/generalization studies**:
   `src/training/training_length_generalization_bis.py`, and
   `src/training/training_local_generalization_all_pes.py`.  
 * **Transfer/interpolation**: multi-addition grid transfer and subtraction transfer
   scripts under `src/training/` (e.g.,
   `multi_addition_grid_transfer_all_pes.py`, `multi_addition_grid_transfer_dif_heads.py`,
   `subtraction_transfer_all_pes.py`, `subtraction_transfer_dif_heads.py`).  
-* **Efficiency studies**: `sample_efficiency_trainer.py`. 
+* **Efficiency studies**: `sample_efficiency_trainer.py` (for 2.4 A,C,D in the paper)
 * **Denoising/backtracking variant**: `blackboard_denoising.py` implements the denoising
   objective described in the code comments.  
 * **Mechanistic interpretability**: `mechanistic_interpretability.py` generates attention
-  visualizations over blackboard grids.
+  visualizations over blackboard grids and `error_distributions_abs_rel.py` plots the error distribution of abs and rel PEs
 
 ## Running a training script
 
