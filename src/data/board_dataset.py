@@ -10,7 +10,7 @@ from src.data.problems import AdditionProblem, SubtractionProblem, MultiAddition
 
 class BlackboardAdditionStepDataset(Dataset):
     """
-    Dataset for masked-write training (variant A) on 2D blackboard addition.
+    Dataset for masked-write training (variant A in initial proposal) on 2D blackboard addition.
 
     Each item corresponds to one step t in one trajectory:
       - input_ids:  S_t  flattened to shape (L,)

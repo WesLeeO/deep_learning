@@ -522,10 +522,6 @@ def generate_setting3_order_constraint(
 
 # ======================================================================
 # Setting 4: full triplet hold-out (generative version)
-# ======================================================================
-
-# ======================================================================
-# Setting 4: full triplet hold-out (generative version)
 #   UPDATED: replace uniform random digits (not in H) with sampling from
 #   a finite background set B (disjoint from H), grouped by carry_in.
 # ======================================================================
