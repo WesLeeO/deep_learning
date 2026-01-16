@@ -1,4 +1,4 @@
-# Multi-addition transfer learning across various positional encodings.
+# Multi-rows addition transfer learning experiment.
 import os
 from typing import Dict, Tuple, List, Any
 
@@ -27,14 +27,13 @@ from src.models.positional_encodings import (
     Abs2DPlusRelBias2D,
 )
 
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CHECKPOINT_DIR = "src/training/trained_weights"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-
 N_HEADS: int = 4
-
 
 PE_KEYS: List[str] = [
     "relative_pe",
@@ -55,14 +54,13 @@ PE_LABELS: Dict[str, str] = {
 }
 
 
-DIGIT_LIST: List[int] = [5, 7, 9, 11]
+N_DIGITS_FIXED: int = 3
+ADDENDS_LIST: List[int] = [3, 5, 7]
 
 
 SAVE_ATTENTION: bool = False
-ATTN_OUT_DIR = os.path.join(CHECKPOINT_DIR, "attn_viz_multiadd_digits")
+ATTN_OUT_DIR = os.path.join(CHECKPOINT_DIR, "attn_viz_multiadd_addends")
 os.makedirs(ATTN_OUT_DIR, exist_ok=True)
-
-
 
 
 def masked_cross_entropy(
@@ -70,6 +68,11 @@ def masked_cross_entropy(
     target_ids: torch.Tensor,
     mask: torch.Tensor,
 ) -> torch.Tensor:
+    """
+    logits: (B, L, V)
+    target_ids: (B, L)
+    mask: (B, L) bool
+    """
     vocab_size = logits.size(-1)
     logits_flat = logits.reshape(-1, vocab_size)
     targets_flat = target_ids.reshape(-1)
@@ -77,7 +80,6 @@ def masked_cross_entropy(
 
     logits_sel = logits_flat[mask_flat]
     targets_sel = targets_flat[mask_flat]
-
     return F.cross_entropy(logits_sel, targets_sel)
 
 
@@ -86,10 +88,12 @@ def masked_accuracy(
     target_ids: torch.Tensor,
     mask: torch.Tensor,
 ) -> Tuple[int, int]:
+    """
+    Returns (num_correct, num_masked_tokens)
+    """
     preds = logits.argmax(dim=-1)
     correct = (preds == target_ids) & mask
-    return correct.sum().item(), mask.sum().item()
-
+    return int(correct.sum().item()), int(mask.sum().item())
 
 
 def build_blackboard_model(pe_key: str, cfg: BoardConfig, n_heads: int) -> BlackboardTransformer:
@@ -146,7 +150,8 @@ def freeze_all_but_last_layer(model: BlackboardTransformer) -> None:
         p.requires_grad = True
 
 
-def maybe_save_attention(attn_obj: Any, pe_key: str, n_digits: int, cfg: BoardConfig) -> None:
+
+def maybe_save_attention(attn_obj: Any, pe_key: str, n_addends: int) -> None:
     """
     Save simple attention heatmaps if available.
     Expected common format: list[tensor] where each tensor is (B, heads, L, L).
@@ -163,10 +168,10 @@ def maybe_save_attention(attn_obj: Any, pe_key: str, n_digits: int, cfg: BoardCo
             for hi in range(min(A_mean.size(0), 8)):
                 plt.figure(figsize=(5, 4))
                 plt.imshow(A_mean[hi].detach().cpu().numpy(), aspect="auto")
-                plt.title(f"{PE_LABELS.get(pe_key, pe_key)} | digits={n_digits} | layer={li} | head={hi}")
+                plt.title(f"{PE_LABELS.get(pe_key, pe_key)} | addends={n_addends} | layer={li} | head={hi}")
                 plt.xlabel("Key pos")
                 plt.ylabel("Query pos")
-                out_path = os.path.join(ATTN_OUT_DIR, f"attn_{pe_key}_d{n_digits}_layer{li}_head{hi}.png")
+                out_path = os.path.join(ATTN_OUT_DIR, f"attn_{pe_key}_a{n_addends}_layer{li}_head{hi}.png")
                 plt.tight_layout()
                 plt.savefig(out_path, dpi=150)
                 plt.close()
@@ -174,14 +179,59 @@ def maybe_save_attention(attn_obj: Any, pe_key: str, n_digits: int, cfg: BoardCo
         print(f"[WARN] Could not save attention maps: {e}")
 
 
+def make_cfg_base(H: int, W: int, n_digits: int) -> BoardConfig:
+    """
+    Base addition: 2 addends.
+    Layout (rows):
+      0: carry
+      1..bottom_row: addends
+      result_row: result
+    """
+    n_addends = 2
+    top_row = 1
+    bottom_row = top_row + n_addends - 1
+    result_row = bottom_row + 1
+    return BoardConfig(
+        H=H,
+        W=W,
+        n_digits=n_digits,
+        n_addends=n_addends,
+        carry_row=0,
+        top_row=top_row,
+        bottom_row=bottom_row,
+        result_row=result_row,
+    )
+
+
+def make_cfg_multi(H: int, W: int, n_digits: int, n_addends: int) -> BoardConfig:
+    """
+    Multi-addition with variable number of addends.
+    Requires H >= n_addends + 2 with this layout.
+    """
+    top_row = 1
+    bottom_row = top_row + n_addends - 1
+    result_row = bottom_row + 1
+    return BoardConfig(
+        H=H,
+        W=W,
+        n_digits=n_digits,
+        n_addends=n_addends,
+        carry_row=0,
+        top_row=top_row,
+        bottom_row=bottom_row,
+        result_row=result_row,
+    )
+
+
+
 def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: BoardConfig) -> str:
     """
-    Train (or load) base model on 2-addend addition (n_digits=3) on a large grid (H,W fixed),
-    return checkpoint path.
+    Train (or load) base model on 2-addend addition (digits fixed).
+    Return checkpoint path.
     """
     ckpt_path = os.path.join(
         CHECKPOINT_DIR,
-        f"blackboard_{pe_key}_{N_HEADS}heads_add_base_3digits_largegrid.pt",
+        f"blackboard_{pe_key}_{N_HEADS}heads_add_base_{cfg_add_base.n_digits}digits_{cfg_add_base.n_addends}addends_H{cfg_add_base.H}W{cfg_add_base.W}.pt",
     )
 
     if not TRAIN_BASE:
@@ -190,8 +240,9 @@ def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: Boa
         print(f"Base checkpoint found: {ckpt_path}")
         return ckpt_path
 
-    n_train_problems = 100_000
-    n_val_problems = 1000
+ny.
+    n_train_problems = 100_000 
+    n_val_problems = 1000 
     batch_size = 64
     num_epochs = 2
     lr = 3e-4
@@ -202,8 +253,20 @@ def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: Boa
     train_problems = generate_diversified_problems(cfg_add_base, n_train_problems, seed=0)
     val_problems = generate_diversified_problems(cfg_add_base, n_val_problems, seed=1)
 
-    train_loader = DataLoader(BlackboardAdditionStepDataset(train_problems), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(BlackboardAdditionStepDataset(val_problems), batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        BlackboardAdditionStepDataset(train_problems),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        BlackboardAdditionStepDataset(val_problems),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     for epoch in range(1, num_epochs + 1):
         model.train()
@@ -215,18 +278,17 @@ def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: Boa
             target_ids = batch["target_ids"].to(DEVICE)
             mask = batch["mask"].to(DEVICE)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             logits, _ = model(input_ids)
             loss = masked_cross_entropy(logits, target_ids, mask)
             loss.backward()
             optimizer.step()
 
             cor, tok = masked_accuracy(logits, target_ids, mask)
-            tot_loss += loss.item() * tok
+            tot_loss += float(loss.item()) * tok
             tot_tok += tok
             tot_cor += cor
-
-            pbar.set_postfix(loss=loss.item(), acc=(cor / max(tok, 1)))
+            pbar.set_postfix(loss=float(loss.item()), acc=(cor / max(tok, 1)))
 
         train_acc = tot_cor / max(tot_tok, 1)
         train_loss = tot_loss / max(tot_tok, 1)
@@ -244,10 +306,10 @@ def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: Boa
                 loss = masked_cross_entropy(logits, target_ids, mask)
                 cor, tok = masked_accuracy(logits, target_ids, mask)
 
-                v_loss += loss.item() * tok
+                v_loss += float(loss.item()) * tok
                 v_tok += tok
                 v_cor += cor
-                pbarv.set_postfix(loss=loss.item(), acc=(cor / max(tok, 1)))
+                pbarv.set_postfix(loss=float(loss.item()), acc=(cor / max(tok, 1)))
 
         val_acc = v_cor / max(v_tok, 1)
         val_loss = v_loss / max(v_tok, 1)
@@ -263,33 +325,41 @@ def train_or_load_base_addition(pe_key: str, TRAIN_BASE: bool, cfg_add_base: Boa
     return ckpt_path
 
 
-def finetune_or_eval_multiadd_for_digits(
+def finetune_or_eval_multiadd_for_addends(
     pe_key: str,
     FINETUNE_MULTI: bool,
     base_ckpt_path: str,
     cfg_multi: BoardConfig,
 ) -> float:
     """
-    Last-layer fine-tuning from base checkpoint for a given n_digits multi-add setting.
-    Returns val overall masked accuracy.
+    Last-layer fine-tuning from base checkpoint for a given n_addends (digits fixed).
+    Returns validation overall masked accuracy.
     """
+    n_addends = cfg_multi.n_addends
     n_digits = cfg_multi.n_digits
+
     ckpt_multi = os.path.join(
         CHECKPOINT_DIR,
-        f"blackboard_{pe_key}_{N_HEADS}heads_multiadd_{n_digits}digits_largegrid_lastlayer.pt",
+        f"blackboard_{pe_key}_{N_HEADS}heads_multiadd_{n_digits}digits_{n_addends}addends_H{cfg_multi.H}W{cfg_multi.W}_lastlayer.pt",
     )
 
     model = build_blackboard_model(pe_key, cfg_multi, N_HEADS)
 
-    n_train_problems = 100_000
-    n_val_problems = 1000
+    n_train_problems = 100_000 
+    n_val_problems = 1000 
     batch_size = 64
     num_epochs = 2
     lr = 3e-4
 
-    # Validation data is needed in both modes
-    val_problems = generate_multi_addition_problems(cfg_multi, n_val_problems, seed=21 + n_digits)
-    val_loader = DataLoader(BlackboardMultiAdditionStepDataset(val_problems), batch_size=batch_size, shuffle=False)
+
+    val_problems = generate_multi_addition_problems(cfg_multi, n_val_problems, seed=100 + n_addends)
+    val_loader = DataLoader(
+        BlackboardMultiAdditionStepDataset(val_problems),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     if FINETUNE_MULTI:
         if not os.path.isfile(base_ckpt_path):
@@ -300,8 +370,14 @@ def finetune_or_eval_multiadd_for_digits(
 
         freeze_all_but_last_layer(model)
 
-        train_problems = generate_multi_addition_problems(cfg_multi, n_train_problems, seed=20 + n_digits)
-        train_loader = DataLoader(BlackboardMultiAdditionStepDataset(train_problems), batch_size=batch_size, shuffle=True)
+        train_problems = generate_multi_addition_problems(cfg_multi, n_train_problems, seed=200 + n_addends)
+        train_loader = DataLoader(
+            BlackboardMultiAdditionStepDataset(train_problems),
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+        )
 
         optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=lr)
 
@@ -311,29 +387,29 @@ def finetune_or_eval_multiadd_for_digits(
 
             pbar = tqdm(
                 train_loader,
-                desc=f"[FT] {PE_LABELS.get(pe_key, pe_key)} d={n_digits} ep {epoch}/{num_epochs}",
+                desc=f"[FT] {PE_LABELS.get(pe_key, pe_key)} a={n_addends} ep {epoch}/{num_epochs}",
             )
             for bi, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(DEVICE)
                 target_ids = batch["target_ids"].to(DEVICE)
                 mask = batch["mask"].to(DEVICE)
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 logits, attn = model(input_ids)
                 loss = masked_cross_entropy(logits, target_ids, mask)
                 loss.backward()
                 optimizer.step()
 
                 cor, tok = masked_accuracy(logits, target_ids, mask)
-                tot_loss += loss.item() * tok
+                tot_loss += float(loss.item()) * tok
                 tot_tok += tok
                 tot_cor += cor
 
-                pbar.set_postfix(loss=loss.item(), acc=(cor / max(tok, 1)))
+                pbar.set_postfix(loss=float(loss.item()), acc=(cor / max(tok, 1)))
 
                 # Save attention once (last epoch, first batch) if enabled
                 if SAVE_ATTENTION and bi == 0 and epoch == num_epochs:
-                    maybe_save_attention(attn, pe_key, n_digits, cfg_multi)
+                    maybe_save_attention(attn, pe_key, n_addends)
 
             train_acc = tot_cor / max(tot_tok, 1)
             train_loss = tot_loss / max(tot_tok, 1)
@@ -342,7 +418,7 @@ def finetune_or_eval_multiadd_for_digits(
             model.eval()
             v_loss, v_tok, v_cor = 0.0, 0, 0
             with torch.no_grad():
-                pbarv = tqdm(val_loader, desc=f"[FT-VAL] {PE_LABELS.get(pe_key, pe_key)} d={n_digits} ep {epoch}")
+                pbarv = tqdm(val_loader, desc=f"[FT-VAL] {PE_LABELS.get(pe_key, pe_key)} a={n_addends} ep {epoch}")
                 for batch in pbarv:
                     input_ids = batch["input_ids"].to(DEVICE)
                     target_ids = batch["target_ids"].to(DEVICE)
@@ -352,16 +428,16 @@ def finetune_or_eval_multiadd_for_digits(
                     loss = masked_cross_entropy(logits, target_ids, mask)
                     cor, tok = masked_accuracy(logits, target_ids, mask)
 
-                    v_loss += loss.item() * tok
+                    v_loss += float(loss.item()) * tok
                     v_tok += tok
                     v_cor += cor
-                    pbarv.set_postfix(loss=loss.item(), acc=(cor / max(tok, 1)))
+                    pbarv.set_postfix(loss=float(loss.item()), acc=(cor / max(tok, 1)))
 
             val_acc = v_cor / max(v_tok, 1)
             val_loss = v_loss / max(v_tok, 1)
 
             print(
-                f"[FT] {pe_key} d={n_digits} ep{epoch}: "
+                f"[FT] {pe_key} a={n_addends} ep{epoch}: "
                 f"train loss/token={train_loss:.4f} acc={train_acc:.4f} | "
                 f"val loss/token={val_loss:.4f} acc={val_acc:.4f}"
             )
@@ -370,7 +446,7 @@ def finetune_or_eval_multiadd_for_digits(
         print(f"Saved multi-add checkpoint to {ckpt_multi}")
         return val_acc
 
-
+    # Eval-only mode
     if not os.path.isfile(ckpt_multi):
         raise FileNotFoundError(f"Multi-add checkpoint not found: {ckpt_multi}. Set FINETUNE_MULTI=True once.")
 
@@ -381,7 +457,7 @@ def finetune_or_eval_multiadd_for_digits(
     v_tok, v_cor = 0, 0
     last_attn = None
     with torch.no_grad():
-        pbarv = tqdm(val_loader, desc=f"[EVAL] {PE_LABELS.get(pe_key, pe_key)} d={n_digits}")
+        pbarv = tqdm(val_loader, desc=f"[EVAL] {PE_LABELS.get(pe_key, pe_key)} a={n_addends}")
         for batch in pbarv:
             input_ids = batch["input_ids"].to(DEVICE)
             target_ids = batch["target_ids"].to(DEVICE)
@@ -396,82 +472,68 @@ def finetune_or_eval_multiadd_for_digits(
             pbarv.set_postfix(acc=(cor / max(tok, 1)))
 
     if SAVE_ATTENTION:
-        maybe_save_attention(last_attn, pe_key, n_digits, cfg_multi)
+        maybe_save_attention(last_attn, pe_key, n_addends)
 
     return v_cor / max(v_tok, 1)
 
 
-
-def plot_digits_vs_accuracy(acc_by_pe: Dict[str, Dict[int, float]]) -> None:
+def plot_addends_vs_accuracy(acc_by_pe: Dict[str, Dict[int, float]]) -> None:
     plt.figure(figsize=(7.2, 4.6))
 
     for pe_key in PE_KEYS:
-        digits = sorted(acc_by_pe[pe_key].keys())
-        accs = [acc_by_pe[pe_key][d] for d in digits]
-        plt.plot(digits, accs, marker="o", label=PE_LABELS.get(pe_key, pe_key))
+        addends = sorted(acc_by_pe[pe_key].keys())
+        accs = [acc_by_pe[pe_key][a] for a in addends]
+        plt.plot(addends, accs, marker="o", label=PE_LABELS.get(pe_key, pe_key))
 
-    plt.xlabel("Number of digits (multi-addition)")
+    plt.xlabel("Number of addends (multi-addition)")
     plt.ylabel("Validation overall masked accuracy")
-    plt.title(f"Transfer learning multi-addition: accuracy vs digits (heads={N_HEADS})")
-    plt.xticks(DIGIT_LIST)
+    plt.title(f"Transfer learning multi-addition: accuracy vs addends (digits={N_DIGITS_FIXED}, heads={N_HEADS})")
+    plt.xticks(ADDENDS_LIST)
     plt.ylim(0.0, 1.0)
     plt.grid(True, alpha=0.25)
     plt.legend()
 
-    out_path = os.path.join(CHECKPOINT_DIR, f"multi_add_digits_vs_val_acc_all_PEs_{N_HEADS}heads.png")
+    out_path = os.path.join(
+        CHECKPOINT_DIR,
+        f"multi_add_addends_vs_val_acc_all_PEs_{N_HEADS}heads_{N_DIGITS_FIXED}digits.png",
+    )
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"Saved digits-vs-accuracy plot to {out_path}")
+    print(f"Saved addends-vs-accuracy plot to {out_path}")
 
 
 
 def main():
 
-    H, W = 5, 13
-
-    cfg_add_base = BoardConfig(
-        H=H,
-        W=W,
-        n_digits=3,
-        n_addends=2,
-        carry_row=0,
-        top_row=1,
-        bottom_row=2,
-        result_row=4,
-    )
+    H = max(ADDENDS_LIST) + 2  # 7 addends -> H=9
+    W = 13
 
     TRAIN_BASE = True
     FINETUNE_MULTI = True
+
+    cfg_add_base = make_cfg_base(H=H, W=W, n_digits=N_DIGITS_FIXED)
 
     acc_by_pe: Dict[str, Dict[int, float]] = {k: {} for k in PE_KEYS}
 
     for pe_key in PE_KEYS:
         print(f"\n==================== PE = {PE_LABELS.get(pe_key, pe_key)} | heads={N_HEADS} ====================\n")
+
         base_ckpt = train_or_load_base_addition(pe_key, TRAIN_BASE, cfg_add_base)
 
-        for n_digits in DIGIT_LIST:
-            cfg_multi = BoardConfig(
-                H=H,
-                W=W,
-                n_digits=n_digits,
-                n_addends=3,
-                carry_row=0,
-                top_row=1,
-                bottom_row=3,
-                result_row=4,
-            )
+        for n_addends in ADDENDS_LIST:
+            cfg_multi = make_cfg_multi(H=H, W=W, n_digits=N_DIGITS_FIXED, n_addends=n_addends)
 
-            print(f"\n---- Multi-add transfer: {PE_LABELS.get(pe_key, pe_key)} | digits={n_digits} ----")
-            val_acc = finetune_or_eval_multiadd_for_digits(
+            print(f"\n---- Multi-add transfer: {PE_LABELS.get(pe_key, pe_key)} | addends={n_addends} ----")
+            val_acc = finetune_or_eval_multiadd_for_addends(
                 pe_key=pe_key,
                 FINETUNE_MULTI=FINETUNE_MULTI,
                 base_ckpt_path=base_ckpt,
                 cfg_multi=cfg_multi,
             )
-            acc_by_pe[pe_key][n_digits] = val_acc
+            acc_by_pe[pe_key][n_addends] = val_acc
 
-    plot_digits_vs_accuracy(acc_by_pe)
+    plot_addends_vs_accuracy(acc_by_pe)
 
 
 if __name__ == "__main__":
