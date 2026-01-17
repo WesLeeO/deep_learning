@@ -285,8 +285,8 @@ class Abs2DPlusRelBias2D(nn.Module):
     """
     def __init__(
         self,
-        abs_pe: nn.Module | None,
-        rel_bias: RelativePositionBias2D | None,
+        abs_pe: nn.Module ,
+        rel_bias: RelativePositionBias2D ,
     ):
         super().__init__()
         self.abs_pe = abs_pe
@@ -297,9 +297,7 @@ class Abs2DPlusRelBias2D(nn.Module):
             return x
         return self.abs_pe(x)
 
-    def get_pos_bias(self) -> torch.Tensor | None:
-        if self.rel_bias is None:
-            return None
+    def get_pos_bias(self) -> torch.Tensor:
         return self.rel_bias()
 
 

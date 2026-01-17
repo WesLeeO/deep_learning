@@ -87,14 +87,20 @@ def make_pes(model_cfg: ModelConfig, board_cfg: BoardConfig):
             "abs_1d_learned",
             LearnedPositionalEncoding1D(model_cfg.d_model, board_cfg.H * board_cfg.W),
         ),
+        ("abs_1d_sinusoidal",
+         SinusoidalPositionalEncoding(model_cfg.d_model, model_cfg.max_len)),
         (
             "abs_2d_learned",
             LearnedPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
         ),
+        ("abs_2d_sinusoidal",
+         SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W)),
         (
             "rel_2d_bias",
             RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
         ),
+        
+
     ]
 
 
@@ -570,7 +576,7 @@ def main():
     p.add_argument(
         "--train-sizes",
         type=str,
-        default="40000",
+        default="50000",
     )
     p.add_argument("--n-val", type=int, default=10000)
 
