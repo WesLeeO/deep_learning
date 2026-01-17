@@ -665,6 +665,7 @@ def main():
             rows = []
 
             for pe_name, _ in pe_list:
+                print(f"\n>>> PE: {pe_name}")
                 # we'll re-instantiate fresh PE modules each time (safer than sharing modules across trainings)
                 # ---- CLASSIC (vocab=12) ----
                 pe_c = dict(make_pes(model_cfg, board_cfg))[pe_name]
