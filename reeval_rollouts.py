@@ -20,7 +20,9 @@ from src.data.problems import generate_diversified_problems
 from src.models.transformers import BlackboardTransformer
 from src.models.positional_encodings import (
     LearnedPositionalEncoding1D,
+    SinusoidalPositionalEncoding,       # 1D sinus
     LearnedPositionalEncoding2D,
+    SinusoidalPositionalEncoding2D,     # 2D sinus
     RelativePositionBias2D,
 )
 from src.training.configs import ModelConfig
@@ -32,8 +34,12 @@ from src.training.configs import ModelConfig
 def make_pe(pe_name: str, model_cfg: ModelConfig, board_cfg: BoardConfig) -> torch.nn.Module:
     if pe_name == "abs_1d_learned":
         return LearnedPositionalEncoding1D(model_cfg.d_model, board_cfg.H * board_cfg.W)
+    if pe_name == "abs_1d_sinusoidal":
+        return SinusoidalPositionalEncoding(model_cfg.d_model, model_cfg.max_len)
     if pe_name == "abs_2d_learned":
         return LearnedPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W)
+    if pe_name == "abs_2d_sinusoidal":
+        return SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W)
     if pe_name == "rel_2d_bias":
         return RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W)
     raise ValueError(f"Unknown pe_name: {pe_name}")
