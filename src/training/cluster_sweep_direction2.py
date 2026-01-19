@@ -35,8 +35,6 @@ from src.models.positional_encodings import (
     SinusoidalPositionalEncoding,       # 1D sinus
     LearnedPositionalEncoding2D,
     SinusoidalPositionalEncoding2D,     # 2D sinus
-    RelativePositionBias2D,
-    Abs2DPlusRelBias2D,
 )
 
 from src.training.configs import ModelConfig
@@ -95,10 +93,7 @@ def make_pes(model_cfg: ModelConfig, board_cfg: BoardConfig):
         ),
         ("abs_2d_sinusoidal",
          SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W)),
-        (
-            "rel_2d_bias",
-            RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
-        ),
+
         
 
     ]
@@ -576,7 +571,7 @@ def main():
     p.add_argument(
         "--train-sizes",
         type=str,
-        default="100000",
+        default="50000",
     )
     p.add_argument("--n-val", type=int, default=10000)
 
@@ -619,13 +614,8 @@ def main():
     # model configs (same as blackboard.py)
     model_cfgs = [
         ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
-        ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
-        ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
-        ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
     ]
-        # ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
-        # ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
-        # ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
+        
 
     def stable_seed(tag: str) -> int:
         # stable across machines/runs (unlike Python's hash())

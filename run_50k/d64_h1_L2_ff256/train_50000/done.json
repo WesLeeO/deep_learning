@@ -1,8 +1,0 @@
-{
-  "model_cfg": "d64_h1_L2_ff256",
-  "n_train": 50000,
-  "n_digits": 5,
-  "n_test": 5000,
-  "noise_p": 0.1,
-  "seconds": 54616.09203648567
-}
