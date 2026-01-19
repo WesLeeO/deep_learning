@@ -28,7 +28,7 @@ The `src/training` folder contains scripts for the main experimental families:
 * **Chain-of-Thought baseline**: `src/training/cot.py` trains 1D CoT transformers for
   comparison.  
 * **Length/generalization studies**:
-  `src/training/training_length_generalization_bis.py`, and
+  `src/training/training_length_generalization.py`, and
   `src/training/training_local_generalization_all_pes.py`.  
 * **Transfer/interpolation**: multi-addition grid transfer and subtraction transfer
   scripts under `src/training/` (e.g.,
