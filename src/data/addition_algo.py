@@ -1,4 +1,3 @@
-# src/data/addition_algo.py
 from dataclasses import dataclass
 from typing import List, Tuple
 import numpy as np
@@ -152,7 +151,7 @@ def generate_trajectory_variant_A(
         next_col = col - 1
         if next_col >= 0:
             if carry == 0:
-                S_next[cfg.carry_row, next_col] = BLANK_TOKEN # -> change to 0 i think
+                S_next[cfg.carry_row, next_col] = 0
             else:
                 S_next[cfg.carry_row, next_col] = carry
             M_t[cfg.carry_row, next_col] = True

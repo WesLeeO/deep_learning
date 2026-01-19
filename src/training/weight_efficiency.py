@@ -189,17 +189,13 @@ def main():
     n_train = 150000
     n_test  = 150000
 
-    n_train = 20
-    n_test  = 20
-
-
     print(f"Generating data: {n_train} train problems, {n_test} test problems (5-digit)")
     train_problems = generate_diversified_problems(cfg, n_train, seed=0)
     test_problems  = generate_diversified_problems(cfg, n_test,  seed=1)
 
     dropout = 0.1
     batch_size = 256
-    num_epochs = 1
+    num_epochs = 8
     lr = 3e-4
 
     # Include your mixed variant here

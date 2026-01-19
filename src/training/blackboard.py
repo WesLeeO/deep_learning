@@ -8,7 +8,6 @@ from src.training.trainers import BlackboardTrainer
 from src.data.addition_algo import BoardConfig
 from src.data.problems import generate_problems, generate_diversified_problems
 from src.models.positional_encodings import *
-from src.models.pe_factory import make_pes
 from src.data.board_dataset import BlackboardAdditionStepDataset
 from src.models.transformers import BlackboardTransformer
 import os
@@ -96,59 +95,59 @@ def model_cfg_name(cfg: ModelConfig) -> str:
         f"_ff{cfg.dim_feedforward}"
     )
 
-# moved to src.models.pe_factory
-# def make_pes(model_cfg, board_cfg):
-#     return [ 
-#         (
-#             "abs_1d_learned",
-#             LearnedPositionalEncoding1D(
-#                 model_cfg.d_model, board_cfg.H * board_cfg.W
-#             )
-#         ),
 
-#         (
-#             "abs_1d_sinusoidal",
-#             SinusoidalPositionalEncoding(
-#                 model_cfg.d_model,
-#                 model_cfg.max_len,
-#             )
-#         ),
+def make_pes(model_cfg, board_cfg):
+    return [ 
+        (
+            "abs_1d_learned",
+            LearnedPositionalEncoding1D(
+                model_cfg.d_model, board_cfg.H * board_cfg.W
+            )
+        ),
 
-#         (
-#             "abs_2d_learned",
-#             LearnedPositionalEncoding2D(
-#                 model_cfg.d_model,
-#                 board_cfg.H,
-#                 board_cfg.W
-#             )
-#         ),
+        (
+            "abs_1d_sinusoidal",
+            SinusoidalPositionalEncoding(
+                model_cfg.d_model,
+                model_cfg.max_len,
+            )
+        ),
 
-#         (
-#             "abs_2d_sin+rel_2d_bias",  Abs2DPlusRelBias2D(
-#             abs_pe=SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
-#             rel_bias=RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
-#             )
-#         ),
+        (
+            "abs_2d_learned",
+            LearnedPositionalEncoding2D(
+                model_cfg.d_model,
+                board_cfg.H,
+                board_cfg.W
+            )
+        ),
 
-#         (
-#             "abs_2d_sinusoidal",
-#             SinusoidalPositionalEncoding2D(
-#                 model_cfg.d_model,
-#                 board_cfg.H,
-#                 board_cfg.W,
-#             )
-#         ),
+        (
+            "abs_2d_sin+rel_2d_bias",  Abs2DPlusRelBias2D(
+            abs_pe=SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
+            rel_bias=RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
+            )
+        ),
 
-#         (
-#             "rel_2d_bias",
-#             RelativePositionBias2D(
-#                 model_cfg.nhead,
-#                 board_cfg.H,
-#                 board_cfg.W,
-#             )
-#         ),
+        (
+            "abs_2d_sinusoidal",
+            SinusoidalPositionalEncoding2D(
+                model_cfg.d_model,
+                board_cfg.H,
+                board_cfg.W,
+            )
+        ),
+
+        (
+            "rel_2d_bias",
+            RelativePositionBias2D(
+                model_cfg.nhead,
+                board_cfg.H,
+                board_cfg.W,
+            )
+        ),
     
-#     ]
+    ]
 
 
 if __name__ == "__main__":
@@ -162,9 +161,45 @@ if __name__ == "__main__":
 
     n_train = 40_000
     n_val = 10_000
+
     model_cfgs = [
         ModelConfig(
+            d_model=64,
+            nhead=1,
+            num_layers=2,
+            dim_feedforward=256,
+            dropout=0.1,
+            max_len=200,
+        ),
+
+        ModelConfig(
+            d_model=64,
+            nhead=2,
+            num_layers=3,
+            dim_feedforward=256,
+            dropout=0.1,
+            max_len=200,
+        ),
+
+        ModelConfig(
             d_model=128,
+            nhead=2,
+            num_layers=3,
+            dim_feedforward=512,
+            dropout=0.1,
+            max_len=200,
+        ),
+
+        ModelConfig(
+            d_model=128,
+            nhead=4,
+            num_layers=4,
+            dim_feedforward=512,
+            dropout=0.1,
+            max_len=200,
+        ),
+        ModelConfig(
+            d_model=256,
             nhead=4,
             num_layers=4,
             dim_feedforward=512,

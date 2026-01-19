@@ -1,3 +1,4 @@
+# Multi-addition transfer learning with last-layer finetuning (we use interpolated relative position biases).
 import os
 from typing import List, Tuple, Optional, Dict
 
@@ -12,11 +13,14 @@ from src.data.addition_algo import BoardConfig
 from src.data.multi_addition_algo import generate_multi_trajectory
 from src.data.problems import generate_multi_addition_problems
 from src.data.board_dataset import BlackboardMultiAdditionStepDataset
-from src.models.blackboard_transformer import BlackboardTransformer
+from src.models.transformers import BlackboardTransformer
 from src.models.positional_encodings import (
-    RelativePositionBias2D,
     SinusoidalPositionalEncoding,
-    AbsolutePositionalEncoding2D,
+    LearnedPositionalEncoding1D,
+    SinusoidalPositionalEncoding2D,
+    LearnedPositionalEncoding2D,
+    RelativePositionBias2D,
+    Abs2DPlusRelBias2D,
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,11 +90,25 @@ def build_blackboard_model(pe_key: str, cfg: BoardConfig) -> BlackboardTransform
     vocab_size = 12
 
     if pe_key == "relative_pe":
-        pos_enc = RelativePositionBias2D(n_heads, cfg.H, cfg.W)
-    elif pe_key == "sinusoidal_pe":
-        pos_enc = SinusoidalPositionalEncoding(d_model, max_len=max_len)
-    elif pe_key == "absolute_pe":
-        pos_enc = AbsolutePositionalEncoding2D(d_model, cfg.H, cfg.W)
+        pos_enc = RelativePositionBias2D(n_heads=n_heads, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_1d_sinusoidal":
+        pos_enc = SinusoidalPositionalEncoding(d_model=D_MODEL, max_len=max_len)
+
+    elif pe_key == "abs_2d_sinusoidal":
+        pos_enc = SinusoidalPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_1d_learned":
+        pos_enc = LearnedPositionalEncoding1D(d_model=D_MODEL, max_len=max_len)
+
+    elif pe_key == "abs_2d_learned":
+        pos_enc = LearnedPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_2d_sin+rel_2d_bias":
+        pos_enc = Abs2DPlusRelBias2D(
+            abs_pe=SinusoidalPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W),
+            rel_bias=RelativePositionBias2D(n_heads=n_heads, H=cfg.H, W=cfg.W),
+        )
     else:
         raise ValueError(f"Unknown PE key: {pe_key}")
 

@@ -1,9 +1,9 @@
-# src/training/training_board_phase_0.py
+# Training script to evaluate length generalization of various positional encodings
 import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-from tqdm.auto import tqdm  # <-- NEW
+from tqdm.auto import tqdm  
 
 from src.data.addition_algo import BoardConfig
 from src.data.problems import generate_problems, generate_diversified_problems
@@ -154,89 +154,90 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    max_eval_digits = 9
-    cfg = BoardConfig(H=4, W=max_eval_digits + 2, n_digits=3)
+    # -----------------------------
+    # Fixed experiment settings
+    # -----------------------------
+    max_eval_digits = 11
     vocab_size = 12
 
-    n_train_problems = 500_000
-    n_val_problems = 2000
-    batch_size = 64
-    num_epochs = 3
+    n_train_problems_total = 500_000
+    n_val_problems = 20_000
+ 
+    batch_size = 1024
+    num_epochs = 8
     lr = 3e-4
 
-    train_problems = generate_diversified_problems(cfg, n_train_problems, seed=0)
-    val_problems   = generate_diversified_problems(cfg, n_val_problems,   seed=1)
-
-    train_ds = BlackboardAdditionStepDataset(train_problems)
-    val_ds   = BlackboardAdditionStepDataset(val_problems)
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
-
     d_model = 128
-    max_len = cfg.H * cfg.W
     n_heads = 4
+    num_layers = 3
+    dim_feedforward = 512
+    dropout = 0.1
 
-    pes = [
-        ("Relative PE", RelativePositionBias2D(n_heads, cfg.H, cfg.W)),
-        ("Sinusoidal PE", SinusoidalPositionalEncoding(d_model, max_len=max_len)),
-        ("Absolute PE", AbsolutePositionalEncoding2D(d_model, cfg.H, cfg.W)),
-        ("Abs+Rel PE",Abs2DPlusRelBias2D(
-                abs_pe=AbsolutePositionalEncoding2D(d_model, cfg.H, cfg.W),
-                rel_bias=RelativePositionBias2D(n_heads, cfg.H, cfg.W),
-            ))
-    ]
+    # We keep W sized for max_eval_digits so model can run on 9-digit boards.
+    # Training configs will differ only by n_digits, but W stays max_eval_digits+2.
+    base_cfg = BoardConfig(H=4, W=max_eval_digits + 2, n_digits=3)
+    max_len = base_cfg.H * base_cfg.W
 
-    for pe in pes:
-        print(f"Starting {pe[0]} ...")
+    pe_specs = [
+    # -----------------------------
+    # Relative-only (2D bias)
+    # -----------------------------
+    ("Relative PE (2D bias)", lambda: RelativePositionBias2D(n_heads, base_cfg.H, base_cfg.W)),
 
+    # -----------------------------
+    # Absolute-only (1D)
+    # -----------------------------
+    ("Sinusoidal PE (1D abs)", lambda: SinusoidalPositionalEncoding(d_model, max_len=max_len)),
+    ("Learned PE (1D abs)",    lambda: LearnedPositionalEncoding1D(d_model, max_len=max_len)),
+
+    # -----------------------------
+    # Absolute-only (2D)
+    # -----------------------------
+    ("Sinusoidal PE (2D abs)", lambda: SinusoidalPositionalEncoding2D(d_model, base_cfg.H, base_cfg.W)),
+    ("Learned PE (2D abs)",    lambda: LearnedPositionalEncoding2D(d_model, base_cfg.H, base_cfg.W)),
+
+    # -----------------------------
+    # Absolute + Relative (2D)
+    # -----------------------------
+    ("Sin2D + RelBias2D", lambda: Abs2DPlusRelBias2D(
+        abs_pe=SinusoidalPositionalEncoding2D(d_model, base_cfg.H, base_cfg.W),
+        rel_bias=RelativePositionBias2D(n_heads, base_cfg.H, base_cfg.W),
+    )),
+    ("Learn2D + RelBias2D", lambda: Abs2DPlusRelBias2D(
+        abs_pe=LearnedPositionalEncoding2D(d_model, base_cfg.H, base_cfg.W),
+        rel_bias=RelativePositionBias2D(n_heads, base_cfg.H, base_cfg.W),
+    )),
+]
+
+
+
+    eval_digits = [5, 7, 9, 11]
+
+    # -----------------------------
+    # Helper: train + eval one PE for a given training dataset
+    # -----------------------------
+    def train_and_eval_one_pe(train_loader, pe_name: str, pe_module):
         model = BlackboardTransformer(
             vocab_size=vocab_size,
             d_model=d_model,
             nhead=n_heads,
-            num_layers=3,
-            dim_feedforward=512,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
             max_len=max_len,
-            dropout=0.1,
-            pos_enc=pe[1],
+            dropout=dropout,
+            pos_enc=pe_module,
         ).to(device)
-
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Model parameters: {total_params:,} total | {trainable_params:,} trainable")
-        print(f"≈ {trainable_params/1e6:.3f}M trainable parameters\n")
-
-        print("Precise Overview of Trainable Parameters:\n")
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                print(name, param.shape)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-        history = {
-            "train_loss": [],
-            "train_acc": [],
-            "train_carry_acc": [],
-            "train_digit_acc": [],
-            "val_loss": [],
-            "val_acc": [],
-            "val_carry_acc": [],
-            "val_digit_acc": [],
-        }
-
-        model.train()
-
+        # Train
         for epoch in range(1, num_epochs + 1):
             model.train()
             total_loss = 0.0
             total_tokens = 0
             total_correct = 0
-            total_carry_correct = 0
-            total_carry_tokens = 0
-            total_digit_correct = 0
-            total_digit_tokens = 0
 
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{num_epochs} [train]")
+            pbar = tqdm(train_loader, desc=f"{pe_name} | epoch {epoch}/{num_epochs} [train]")
             for batch in pbar:
                 input_ids  = batch["input_ids"].to(device)
                 target_ids = batch["target_ids"].to(device)
@@ -250,147 +251,114 @@ def main():
                 optimizer.step()
 
                 batch_tokens = mask.sum().item()
-                batch_loss = loss.item()
-
-                (
-                    b_total_correct,
-                    b_total_tokens,
-                    b_carry_correct,
-                    b_carry_tokens,
-                    b_digit_correct,
-                    b_digit_tokens,
-                ) = accuracy_with_splits(
-                    logits, target_ids, mask, H=cfg.H, W=cfg.W
-                )
-
-                total_loss += batch_loss * batch_tokens
+                total_loss += loss.item() * batch_tokens
                 total_tokens += batch_tokens
-                total_correct += b_total_correct
-                total_carry_correct += b_carry_correct
-                total_carry_tokens += b_carry_tokens
-                total_digit_correct += b_digit_correct
-                total_digit_tokens += b_digit_tokens
 
-                batch_acc = b_total_correct / max(b_total_tokens, 1)
-                pbar.set_postfix(loss=batch_loss, acc=batch_acc)
+                preds = logits.argmax(dim=-1)
+                total_correct += ((preds == target_ids) & mask).sum().item()
+
+                pbar.set_postfix(loss=loss.item(), acc=(total_correct / max(total_tokens, 1)))
 
             avg_loss = total_loss / max(total_tokens, 1)
-            avg_acc  = total_correct / max(total_tokens, 1)
-            carry_acc = (
-                total_carry_correct / total_carry_tokens
-                if total_carry_tokens > 0 else 0.0
-            )
-            digit_acc = (
-                total_digit_correct / total_digit_tokens
-                if total_digit_tokens > 0 else 0.0
-            )
+            avg_acc = total_correct / max(total_tokens, 1)
+            print(f"[{pe_name}] Epoch {epoch}/{num_epochs} | loss/token={avg_loss:.4f} | acc={avg_acc:.4f}")
 
-            history["train_loss"].append(avg_loss)
-            history["train_acc"].append(avg_acc)
-            history["train_carry_acc"].append(carry_acc)
-            history["train_digit_acc"].append(digit_acc)
+        # Evaluate generalization (overall acc only)
+        gen_accs = {}
+        for nd in eval_digits:
+            cfg_eval = BoardConfig(H=base_cfg.H, W=base_cfg.W, n_digits=nd)
+            eval_problems = generate_diversified_problems(cfg_eval, n_val_problems, seed=10 + nd)
+            eval_ds = BlackboardAdditionStepDataset(eval_problems)
+            eval_loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False)
 
-            val_avg_loss, val_avg_acc, val_carry_acc, val_digit_acc = evaluate_board_model(
-                model,
-                val_loader,
-                cfg,
-                device,
-                desc=f"Epoch {epoch}/{num_epochs} [val]",
-            )
-
-            history["val_loss"].append(val_avg_loss)
-            history["val_acc"].append(val_avg_acc)
-            history["val_carry_acc"].append(val_carry_acc)
-            history["val_digit_acc"].append(val_digit_acc)
-
-            print(
-                f"\nEpoch {epoch}/{num_epochs} "
-                f"| train loss/token: {avg_loss:.4f} "
-                f"| train acc(masked): {avg_acc:.4f} "
-                f"| train carry acc: {carry_acc:.4f} "
-                f"| train digit acc: {digit_acc:.4f}"
-            )
-            print(
-                f"Epoch {epoch}/{num_epochs} "
-                f"| val   loss/token: {val_avg_loss:.4f} "
-                f"| val   acc(masked): {val_avg_acc:.4f} "
-                f"| val   carry acc: {val_carry_acc:.4f} "
-                f"| val   digit acc: {val_digit_acc:.4f}"
-            )
-            print("-" * 80)
-
-        print("Training history:")
-        for e in range(num_epochs):
-            print(
-                f"Epoch {e+1}: "
-                f"train_loss={history['train_loss'][e]:.4f}, "
-                f"train_acc={history['train_acc'][e]:.4f}, "
-                f"train_carry_acc={history['train_carry_acc'][e]:.4f}, "
-                f"train_digit_acc={history['train_digit_acc'][e]:.4f}, "
-                f"val_loss={history['val_loss'][e]:.4f}, "
-                f"val_acc={history['val_acc'][e]:.4f}, "
-                f"val_carry_acc={history['val_carry_acc'][e]:.4f}, "
-                f"val_digit_acc={history['val_digit_acc'][e]:.4f}"
-            )
-
-        digit_cfgs = {
-            3: BoardConfig(H=cfg.H, W=cfg.W, n_digits=3),
-            5: BoardConfig(H=cfg.H, W=cfg.W, n_digits=5),
-            7: BoardConfig(H=cfg.H, W=cfg.W, n_digits=7),
-        }
-        gen_results = {}
-        for n_digits, cfg_eval in digit_cfgs.items():
-            if n_digits == 3:
-                eval_loader = val_loader
-            else:
-                eval_problems = generate_diversified_problems(
-                    cfg_eval, n_val_problems, seed=10 + n_digits
-                )
-                eval_ds = BlackboardAdditionStepDataset(eval_problems)
-                eval_loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False)
-
-            eval_loss, eval_acc, eval_carry_acc, eval_digit_acc = evaluate_board_model(
+            eval_loss, eval_acc, _carry_acc, _digit_acc = evaluate_board_model(
                 model,
                 eval_loader,
                 cfg_eval,
                 device,
-                desc=f"{pe[0]} {n_digits}-digit eval",
+                desc=f"{pe_name} | {nd}-digit eval",
             )
-            gen_results[n_digits] = {
-                "loss": eval_loss,
-                "acc": eval_acc,
-                "carry_acc": eval_carry_acc,
-                "digit_acc": eval_digit_acc,
-            }
+            gen_accs[nd] = eval_acc
+            print(f"[{pe_name}] {nd}-digit | loss={eval_loss:.4f} | acc={eval_acc:.4f}")
 
-        print("Generalization results:")
-        for n_digits in sorted(gen_results.keys()):
-            r = gen_results[n_digits]
-            print(
-                f"{n_digits}-digit | loss: {r['loss']:.4f} "
-                f"| acc: {r['acc']:.4f} "
-                f"| carry acc: {r['carry_acc']:.4f} "
-                f"| digit acc: {r['digit_acc']:.4f}"
-            )
+        return gen_accs
 
-        digits_list = sorted(gen_results.keys())
-        accs = [gen_results[d]["acc"] for d in digits_list]
-        carry_accs = [gen_results[d]["carry_acc"] for d in digits_list]
-        digit_accs = [gen_results[d]["digit_acc"] for d in digits_list]
+    # -----------------------------
+    # Helper: make a training loader for a given training regime
+    # -----------------------------
+    def make_train_loader_train_3_only():
+        cfg_train = BoardConfig(H=base_cfg.H, W=base_cfg.W, n_digits=3)
+        train_problems = generate_diversified_problems(cfg_train, n_train_problems_total, seed=0)
+        train_ds = BlackboardAdditionStepDataset(train_problems)
+        return DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-        plt.figure()
-        plt.plot(digits_list, accs, marker="o", label="overall")
-        plt.plot(digits_list, carry_accs, marker="o", label="carry row")
-        plt.plot(digits_list, digit_accs, marker="o", label="digit row")
-        plt.xlabel("Number of digits")
-        plt.ylabel("Accuracy")
-        plt.ylim(0.0, 1.05)
-        plt.title(f"{pe[0]} - length generalization")
-        plt.legend()
-        plt.grid(True)
-        filename = pe[0].lower().replace(" ", "_")
-        plt.savefig(f"length_generalization_{filename}.png")
-        plt.close()
+    def make_train_loader_train_3_and_4():
+        n_each = n_train_problems_total // 2  # 250k + 250k
+        cfg3 = BoardConfig(H=base_cfg.H, W=base_cfg.W, n_digits=3)
+        cfg4 = BoardConfig(H=base_cfg.H, W=base_cfg.W, n_digits=4)
+
+        train3 = generate_diversified_problems(cfg3, n_each, seed=0)
+        train4 = generate_diversified_problems(cfg4, n_each, seed=1)
+
+        train_ds3 = BlackboardAdditionStepDataset(train3)
+        train_ds4 = BlackboardAdditionStepDataset(train4)
+
+        merged_ds = torch.utils.data.ConcatDataset([train_ds3, train_ds4])
+        return DataLoader(merged_ds, batch_size=batch_size, shuffle=True)
+
+    # -----------------------------
+    # EXP A: train on 3-digit only
+    # -----------------------------
+    print("\n" + "=" * 90)
+    print("EXPERIMENT A: Train on 3-digit only; eval on 5/7/9 digits (overall acc)")
+    train_loader_A = make_train_loader_train_3_only()
+
+    results_A = {name: [] for name, _ in pe_specs}
+    for pe_name, pe_factory in pe_specs:
+        pe = pe_factory()
+        gen_accs = train_and_eval_one_pe(train_loader_A, pe_name, pe)
+        results_A[pe_name] = [gen_accs[d] for d in eval_digits]
+
+    plt.figure()
+    for pe_name in results_A:
+        plt.plot(eval_digits, results_A[pe_name], marker="o", label=pe_name)
+    plt.xlabel("Number of digits (test)")
+    plt.ylabel("Overall masked accuracy")
+    plt.ylim(0.0, 1.05)
+    plt.title("Generalization after training on 3-digit only")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("gen_overall_train3_test5_7_9.png")
+    plt.close()
+    print("Saved: gen_overall_train3_test5_7_9.png")
+
+    # -----------------------------
+    # EXP B: train on mixed 3+4 digits
+    # -----------------------------
+    print("\n" + "=" * 90)
+    print("EXPERIMENT B: Train on 3+4 digits (250k each); eval on 5/7/9 digits (overall acc)")
+    train_loader_B = make_train_loader_train_3_and_4()
+
+    results_B = {name: [] for name, _ in pe_specs}
+    for pe_name, pe_factory in pe_specs:
+        pe = pe_factory()
+        gen_accs = train_and_eval_one_pe(train_loader_B, pe_name, pe)
+        results_B[pe_name] = [gen_accs[d] for d in eval_digits]
+
+    plt.figure()
+    for pe_name in results_B:
+        plt.plot(eval_digits, results_B[pe_name], marker="o", label=pe_name)
+    plt.xlabel("Number of digits (test)")
+    plt.ylabel("Overall masked accuracy")
+    plt.ylim(0.0, 1.05)
+    plt.title("Generalization after training on mixed 3+4 digits")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("gen_overall_train3and4_test5_7_9.png")
+    plt.close()
+    print("Saved: gen_overall_train3and4_test5_7_9.png")
 
 
 if __name__ == "__main__":

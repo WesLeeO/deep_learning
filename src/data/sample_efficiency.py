@@ -522,10 +522,6 @@ def generate_setting3_order_constraint(
 
 # ======================================================================
 # Setting 4: full triplet hold-out (generative version)
-# ======================================================================
-
-# ======================================================================
-# Setting 4: full triplet hold-out (generative version)
 #   UPDATED: replace uniform random digits (not in H) with sampling from
 #   a finite background set B (disjoint from H), grouped by carry_in.
 # ======================================================================
@@ -795,5 +791,5 @@ if __name__ == "__main__":
 
 #setting 1 tests nb of samples needed to generaliye
 #setting 2 tests how able to generalise to tripplets appearing in different cols from train/test
-#settign 3 tests if can generalise from permutation of cols (ie carry,a ,b becomes carry,b,a)
-#last tests generalisation to unseen tripplets (probably the hardest)
+#settign 3 tests if can generalise from permutation of cols (ie carry,a ,b becomes carr,b,a)
+#setting 4 tests generalisation to unseen tripplets (probably the hardest, none should generalise)

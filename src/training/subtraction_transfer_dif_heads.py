@@ -1,6 +1,6 @@
-
+# Multi-addition transfer learning with last-layer finetuning (with different #heads).
 import os
-from typing import Dict, Tuple, List
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 import torch
@@ -10,34 +10,30 @@ from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 
 from src.data.addition_algo import BoardConfig
-from src.data.problems import (
-    generate_diversified_problems,
-    generate_multi_addition_problems,
-)
-from src.data.board_dataset import (
-    BlackboardAdditionStepDataset,
-    BlackboardMultiAdditionStepDataset,
-)
+from src.data.subtraction_algo import generate_trajectory_variant_A as generate_subtraction_trajectory
+from src.data.problems import generate_subtraction_problems, generate_diversified_problems
+from src.data.board_dataset import BlackboardSubtractionStepDataset, BlackboardAdditionStepDataset
 from src.models.transformers import BlackboardTransformer
 from src.models.positional_encodings import (
-    RelativePositionBias2D,
     SinusoidalPositionalEncoding,
-    AbsolutePositionalEncoding2D,
+    LearnedPositionalEncoding1D,
+    SinusoidalPositionalEncoding2D,
+    LearnedPositionalEncoding2D,
+    RelativePositionBias2D,
+    Abs2DPlusRelBias2D,
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CHECKPOINT_DIR = "src/training/trained_weights"
+OUTPUT_DIR = "attn_viz_subtraction_transfer"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-HEAD_COUNTS: List[int] = [1, 2, 8] #[1, 2, 4, 8] 
+HEAD_COUNTS: List[int] = [1, 2, 4, 8]
 
 
-def masked_cross_entropy(
-    logits: torch.Tensor,
-    target_ids: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
+def masked_cross_entropy(logits: torch.Tensor, target_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     vocab_size = logits.size(-1)
     logits_flat = logits.reshape(-1, vocab_size)
     targets_flat = target_ids.reshape(-1)
@@ -88,17 +84,31 @@ def accuracy_with_splits(
 
 def build_blackboard_model(pe_key: str, cfg: BoardConfig, n_heads: int) -> BlackboardTransformer:
     d_model = 128
-    num_layers = 3
+    num_layers = 4
     dim_feedforward = 512
     max_len = cfg.H * cfg.W
     vocab_size = 12
 
     if pe_key == "relative_pe":
-        pos_enc = RelativePositionBias2D(n_heads, cfg.H, cfg.W)
-    elif pe_key == "sinusoidal_pe":
-        pos_enc = SinusoidalPositionalEncoding(d_model, max_len=max_len)
-    elif pe_key == "absolute_pe":
-        pos_enc = AbsolutePositionalEncoding2D(d_model, cfg.H, cfg.W)
+        pos_enc = RelativePositionBias2D(n_heads=n_heads, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_1d_sinusoidal":
+        pos_enc = SinusoidalPositionalEncoding(d_model=D_MODEL, max_len=max_len)
+
+    elif pe_key == "abs_2d_sinusoidal":
+        pos_enc = SinusoidalPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_1d_learned":
+        pos_enc = LearnedPositionalEncoding1D(d_model=D_MODEL, max_len=max_len)
+
+    elif pe_key == "abs_2d_learned":
+        pos_enc = LearnedPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W)
+
+    elif pe_key == "abs_2d_sin+rel_2d_bias":
+        pos_enc = Abs2DPlusRelBias2D(
+            abs_pe=SinusoidalPositionalEncoding2D(d_model=D_MODEL, H=cfg.H, W=cfg.W),
+            rel_bias=RelativePositionBias2D(n_heads=n_heads, H=cfg.H, W=cfg.W),
+        )
     else:
         raise ValueError(f"Unknown PE key: {pe_key}")
 
@@ -116,6 +126,17 @@ def build_blackboard_model(pe_key: str, cfg: BoardConfig, n_heads: int) -> Black
     return model
 
 
+def load_addition_checkpoint(pe_key: str, cfg: BoardConfig, n_heads: int) -> BlackboardTransformer:
+    model = build_blackboard_model(pe_key, cfg, n_heads)
+    ckpt_path = os.path.join(
+        CHECKPOINT_DIR,
+        f"blackboard_{pe_key}_{n_heads}heads_addition.pt",
+    )
+    state = torch.load(ckpt_path, map_location=DEVICE)
+    model.load_state_dict(state)
+    return model
+
+
 def freeze_all_but_last_layer(model: BlackboardTransformer) -> None:
     for param in model.parameters():
         param.requires_grad = False
@@ -125,22 +146,18 @@ def freeze_all_but_last_layer(model: BlackboardTransformer) -> None:
         param.requires_grad = True
 
 
-def train_or_load_largegrid_addition_models(
-    TRAIN_BASE: bool,
-    cfg_add_large: BoardConfig,
-) -> Dict[int, BlackboardTransformer]:
+def train_or_load_addition_models(TRAIN_BASE: bool, cfg: BoardConfig) -> None:
     pe_key = "relative_pe"
-    models: Dict[int, BlackboardTransformer] = {}
 
     n_train_problems = 200_000
     n_val_problems = 5_000
     batch_size = 64
-    num_epochs = 3 #2
+    num_epochs = 2
     lr = 3e-4
 
     if TRAIN_BASE:
-        train_problems = generate_diversified_problems(cfg_add_large, n_train_problems, seed=0)
-        val_problems = generate_diversified_problems(cfg_add_large, n_val_problems, seed=1)
+        train_problems = generate_diversified_problems(cfg, n_train_problems, seed=0)
+        val_problems = generate_diversified_problems(cfg, n_val_problems, seed=1)
 
         train_ds = BlackboardAdditionStepDataset(train_problems)
         val_ds = BlackboardAdditionStepDataset(val_problems)
@@ -152,13 +169,13 @@ def train_or_load_largegrid_addition_models(
         val_loader = None
 
     for n_heads in HEAD_COUNTS:
-        print(f"==== {pe_key}, {n_heads} heads (large grid addition, 3 digits) ====")
+        print(f"==== {pe_key}, {n_heads} heads (addition base) ====")
         ckpt_path = os.path.join(
             CHECKPOINT_DIR,
-            f"blackboard_{pe_key}_{n_heads}heads_3digits_largegrid.pt",
+            f"blackboard_{pe_key}_{n_heads}heads_addition.pt",
         )
 
-        model = build_blackboard_model(pe_key, cfg_add_large, n_heads)
+        model = build_blackboard_model(pe_key, cfg, n_heads)
 
         if TRAIN_BASE:
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -175,7 +192,7 @@ def train_or_load_largegrid_addition_models(
 
                 pbar = tqdm(
                     train_loader,
-                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [train largegrid add]",
+                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [train addition]",
                 )
                 for batch in pbar:
                     input_ids = batch["input_ids"].to(DEVICE)
@@ -199,7 +216,7 @@ def train_or_load_largegrid_addition_models(
                         b_carry_tokens,
                         b_digit_correct,
                         b_digit_tokens,
-                    ) = accuracy_with_splits(logits, target_ids, mask, cfg_add_large)
+                    ) = accuracy_with_splits(logits, target_ids, mask, cfg)
 
                     total_loss += batch_loss * batch_tokens
                     total_tokens += batch_tokens
@@ -244,7 +261,7 @@ def train_or_load_largegrid_addition_models(
 
                 pbar_val = tqdm(
                     val_loader,
-                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [val largegrid add]",
+                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [val addition]",
                 )
                 with torch.no_grad():
                     for batch in pbar_val:
@@ -265,7 +282,7 @@ def train_or_load_largegrid_addition_models(
                             b_carry_tokens,
                             b_digit_correct,
                             b_digit_tokens,
-                        ) = accuracy_with_splits(logits, target_ids, mask, cfg_add_large)
+                        ) = accuracy_with_splits(logits, target_ids, mask, cfg)
 
                         val_loss += batch_loss * batch_tokens
                         val_tokens += batch_tokens
@@ -300,27 +317,17 @@ def train_or_load_largegrid_addition_models(
                 )
 
             torch.save(model.state_dict(), ckpt_path)
-            print(f"Saved large-grid addition checkpoint to {ckpt_path}")
+            print(f"Saved addition checkpoint to {ckpt_path}")
         else:
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(
-                    f"Large-grid addition checkpoint not found for {pe_key}, {n_heads} heads: {ckpt_path}. "
+                    f"Addition checkpoint not found for {pe_key}, {n_heads} heads: {ckpt_path}. "
                     f"Set TRAIN_BASE=True once to create it."
                 )
-            state = torch.load(ckpt_path, map_location=DEVICE)
-            model.load_state_dict(state)
-            print(f"Loaded large-grid addition checkpoint from {ckpt_path}")
-
-        models[n_heads] = model
-
-    return models
+            print(f"Found addition checkpoint for {pe_key}, {n_heads} heads at {ckpt_path}")
 
 
-def train_or_load_multiaddition_from_largegrid(
-    FINETUNE_MULTI: bool,
-    cfg_add_large: BoardConfig,
-    cfg_multi: BoardConfig,
-) -> Tuple[Dict[int, BlackboardTransformer], Dict[int, float]]:
+def train_or_load_subtraction_models(FINETUNE: bool, cfg: BoardConfig) -> Tuple[Dict[int, BlackboardTransformer], Dict[int, float]]:
     pe_key = "relative_pe"
     models: Dict[int, BlackboardTransformer] = {}
     val_acc_per_heads: Dict[int, float] = {}
@@ -331,52 +338,38 @@ def train_or_load_multiaddition_from_largegrid(
     num_epochs = 2
     lr = 3e-4
 
-    if FINETUNE_MULTI:
-        train_problems = generate_multi_addition_problems(cfg_multi, n_train_problems, seed=20)
-        val_problems = generate_multi_addition_problems(cfg_multi, n_val_problems, seed=21)
+    if FINETUNE:
+        train_problems = generate_subtraction_problems(cfg, n_train_problems, seed=10)
+        val_problems = generate_subtraction_problems(cfg, n_val_problems, seed=11)
 
-        train_ds = BlackboardMultiAdditionStepDataset(train_problems)
-        val_ds = BlackboardMultiAdditionStepDataset(val_problems)
+        train_ds = BlackboardSubtractionStepDataset(train_problems)
+        val_ds = BlackboardSubtractionStepDataset(val_problems)
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     else:
         train_loader = None
-        val_problems = generate_multi_addition_problems(cfg_multi, n_val_problems, seed=21)
-        val_ds = BlackboardMultiAdditionStepDataset(val_problems)
+        val_problems = generate_subtraction_problems(cfg, n_val_problems, seed=11)
+        val_ds = BlackboardSubtractionStepDataset(val_problems)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     for n_heads in HEAD_COUNTS:
-        print(f"==== {pe_key}, {n_heads} heads (multi-addition, >3 digits, from largegrid) ====")
-        ckpt_base = os.path.join(
+        print(f"==== {pe_key}, {n_heads} heads (subtraction transfer) ====")
+        ckpt_sub_path = os.path.join(
             CHECKPOINT_DIR,
-            f"blackboard_{pe_key}_{n_heads}heads_3digits_largegrid.pt",
-        )
-        ckpt_multi = os.path.join(
-            CHECKPOINT_DIR,
-            f"blackboard_{pe_key}_{n_heads}heads_multiadd_5digits_largegrid_lastlayer.pt",
+            f"blackboard_{pe_key}_{n_heads}heads_subtraction_lastlayer.pt",
         )
 
-        model_multi = build_blackboard_model(pe_key, cfg_multi, n_heads)
-
-        if FINETUNE_MULTI:
-            if not os.path.isfile(ckpt_base):
-                raise FileNotFoundError(
-                    f"Base large-grid checkpoint not found for {pe_key}, {n_heads} heads: {ckpt_base}. "
-                    f"Train base first."
-                )
-            state_base = torch.load(ckpt_base, map_location=DEVICE)
-            model_multi.load_state_dict(state_base)
-
-            freeze_all_but_last_layer(model_multi)
-
+        if FINETUNE:
+            model = load_addition_checkpoint(pe_key, cfg, n_heads)
+            freeze_all_but_last_layer(model)
             optimizer = torch.optim.Adam(
-                [p for p in model_multi.parameters() if p.requires_grad],
+                [p for p in model.parameters() if p.requires_grad],
                 lr=lr,
             )
 
             for epoch in range(1, num_epochs + 1):
-                model_multi.train()
+                model.train()
                 total_loss = 0.0
                 total_tokens = 0
                 total_correct = 0
@@ -387,7 +380,7 @@ def train_or_load_multiaddition_from_largegrid(
 
                 pbar = tqdm(
                     train_loader,
-                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [train multi-add >3d]",
+                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [train subtraction]",
                 )
                 for batch in pbar:
                     input_ids = batch["input_ids"].to(DEVICE)
@@ -395,7 +388,7 @@ def train_or_load_multiaddition_from_largegrid(
                     mask = batch["mask"].to(DEVICE)
 
                     optimizer.zero_grad()
-                    logits, _ = model_multi(input_ids)
+                    logits, _ = model(input_ids)
 
                     loss = masked_cross_entropy(logits, target_ids, mask)
                     loss.backward()
@@ -411,7 +404,7 @@ def train_or_load_multiaddition_from_largegrid(
                         b_carry_tokens,
                         b_digit_correct,
                         b_digit_tokens,
-                    ) = accuracy_with_splits(logits, target_ids, mask, cfg_multi)
+                    ) = accuracy_with_splits(logits, target_ids, mask, cfg)
 
                     total_loss += batch_loss * batch_tokens
                     total_tokens += batch_tokens
@@ -445,7 +438,7 @@ def train_or_load_multiaddition_from_largegrid(
                     f"| train digit acc: {digit_acc:.4f}"
                 )
 
-                model_multi.eval()
+                model.eval()
                 val_loss = 0.0
                 val_tokens = 0
                 val_correct = 0
@@ -456,7 +449,7 @@ def train_or_load_multiaddition_from_largegrid(
 
                 pbar_val = tqdm(
                     val_loader,
-                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [val multi-add >3d]",
+                    desc=f"{pe_key} {n_heads}h Epoch {epoch}/{num_epochs} [val subtraction]",
                 )
                 with torch.no_grad():
                     for batch in pbar_val:
@@ -464,7 +457,7 @@ def train_or_load_multiaddition_from_largegrid(
                         target_ids = batch["target_ids"].to(DEVICE)
                         mask = batch["mask"].to(DEVICE)
 
-                        logits, _ = model_multi(input_ids)
+                        logits, _ = model(input_ids)
                         loss = masked_cross_entropy(logits, target_ids, mask)
 
                         batch_tokens = mask.sum().item()
@@ -477,7 +470,7 @@ def train_or_load_multiaddition_from_largegrid(
                             b_carry_tokens,
                             b_digit_correct,
                             b_digit_tokens,
-                        ) = accuracy_with_splits(logits, target_ids, mask, cfg_multi)
+                        ) = accuracy_with_splits(logits, target_ids, mask, cfg)
 
                         val_loss += batch_loss * batch_tokens
                         val_tokens += batch_tokens
@@ -513,19 +506,20 @@ def train_or_load_multiaddition_from_largegrid(
 
                 val_acc_per_heads[n_heads] = val_avg_acc
 
-            torch.save(model_multi.state_dict(), ckpt_multi)
-            print(f"Saved multi-addition (>3 digits) checkpoint to {ckpt_multi}")
+            torch.save(model.state_dict(), ckpt_sub_path)
+            print(f"Saved subtraction-transfer checkpoint to {ckpt_sub_path}")
         else:
-            if not os.path.isfile(ckpt_multi):
+            if not os.path.isfile(ckpt_sub_path):
                 raise FileNotFoundError(
-                    f"Multi-addition checkpoint not found for {pe_key}, {n_heads} heads: {ckpt_multi}. "
-                    f"Set FINETUNE_MULTI=True once to create it."
+                    f"Subtraction-transfer checkpoint not found for {pe_key}, {n_heads} heads: {ckpt_sub_path}. "
+                    f"Set FINETUNE=True once to create it."
                 )
-            state = torch.load(ckpt_multi, map_location=DEVICE)
-            model_multi.load_state_dict(state)
-            print(f"Loaded multi-addition checkpoint from {ckpt_multi}")
+            model = build_blackboard_model(pe_key, cfg, n_heads)
+            state = torch.load(ckpt_sub_path, map_location=DEVICE)
+            model.load_state_dict(state)
+            print(f"Loaded subtraction-transfer checkpoint from {ckpt_sub_path}")
 
-            model_multi.eval()
+            model.eval()
             val_loss = 0.0
             val_tokens = 0
             val_correct = 0
@@ -536,7 +530,7 @@ def train_or_load_multiaddition_from_largegrid(
 
             pbar_val = tqdm(
                 val_loader,
-                desc=f"{pe_key} {n_heads}h [eval multi-add >3d]",
+                desc=f"{pe_key} {n_heads}h [eval subtraction]",
             )
             with torch.no_grad():
                 for batch in pbar_val:
@@ -544,7 +538,7 @@ def train_or_load_multiaddition_from_largegrid(
                     target_ids = batch["target_ids"].to(DEVICE)
                     mask = batch["mask"].to(DEVICE)
 
-                    logits, _ = model_multi(input_ids)
+                    logits, _ = model(input_ids)
                     loss = masked_cross_entropy(logits, target_ids, mask)
 
                     batch_tokens = mask.sum().item()
@@ -557,7 +551,7 @@ def train_or_load_multiaddition_from_largegrid(
                         b_carry_tokens,
                         b_digit_correct,
                         b_digit_tokens,
-                    ) = accuracy_with_splits(logits, target_ids, mask, cfg_multi)
+                    ) = accuracy_with_splits(logits, target_ids, mask, cfg)
 
                     val_loss += batch_loss * batch_tokens
                     val_tokens += batch_tokens
@@ -574,9 +568,133 @@ def train_or_load_multiaddition_from_largegrid(
             val_avg_acc = val_correct / max(val_tokens, 1)
             val_acc_per_heads[n_heads] = val_avg_acc
 
-        models[n_heads] = model_multi
+        models[n_heads] = model
 
     return models, val_acc_per_heads
+
+
+def build_subtraction_examples(cfg: BoardConfig) -> List[Tuple[str, np.ndarray]]:
+    examples = [
+        ("no_borrow", np.array([765, 123], dtype=np.int64)),
+        ("single_borrow_units", np.array([302, 129], dtype=np.int64)),
+        ("borrow_chain", np.array([400, 199], dtype=np.int64)),
+        ("full_borrow_chain", np.array([1000 - 1, 1], dtype=np.int64)),
+    ]
+    return examples
+
+
+def board_to_input_tensor(board: np.ndarray) -> torch.Tensor:
+    x = torch.from_numpy(board.astype(np.int64)).view(-1)
+    return x.unsqueeze(0).to(DEVICE)
+
+
+def query_indices_for_step(cfg: BoardConfig, step: int) -> Tuple[int, Optional[int]]:
+    col_end = cfg.W - 1
+    col = col_end - step
+
+    result_row = cfg.result_row
+    result_idx = result_row * cfg.W + col
+
+    carry_idx: Optional[int] = None
+    next_col = col - 1
+    if next_col >= 0:
+        carry_row = cfg.carry_row
+        carry_idx = carry_row * cfg.W + next_col
+
+    return result_idx, carry_idx
+
+
+def plot_attention_grid(
+    attn_layers: List[torch.Tensor],
+    cfg: BoardConfig,
+    q_idx: int,
+    title: str,
+    out_path: str,
+) -> None:
+    num_layers = len(attn_layers)
+    if num_layers == 0:
+        raise ValueError("No attention layers provided.")
+
+    B, n_heads, L, _ = attn_layers[0].shape
+    assert B == 1
+    assert L == cfg.H * cfg.W
+
+    fig, axes = plt.subplots(
+        num_layers,
+        n_heads,
+        figsize=(3 * n_heads, 3 * num_layers),
+        squeeze=False,
+    )
+
+    vmin, vmax = 0.0, 1.0
+
+    for layer_idx, attn in enumerate(attn_layers):
+        attn_layer = attn[0]
+        for head_idx in range(n_heads):
+            A = attn_layer[head_idx]
+            a_q = A[q_idx].detach().cpu().numpy()
+            heatmap = a_q.reshape(cfg.H, cfg.W)
+
+            ax = axes[layer_idx][head_idx]
+            im = ax.imshow(heatmap, origin="upper", vmin=vmin, vmax=vmax)
+            q_row = q_idx // cfg.W
+            q_col = q_idx % cfg.W
+            ax.scatter(
+                q_col,
+                q_row,
+                marker="s",
+                edgecolor="black",
+                facecolor="none",
+                s=60,
+            )
+
+            ax.set_xticks(range(cfg.W))
+            ax.set_yticks(range(cfg.H))
+            ax.set_xlabel("col")
+            ax.set_ylabel("row")
+            ax.set_title(f"L{layer_idx} H{head_idx}")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.92)
+
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(im, cax=cbar_ax)
+
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def visualize_attention(models: Dict[int, BlackboardTransformer], cfg: BoardConfig) -> None:
+    examples = build_subtraction_examples(cfg)
+
+    for n_heads, model in models.items():
+        model.eval()
+        for ex_name, xs in examples:
+            S_seq, M_seq = generate_subtraction_trajectory(cfg, xs)
+
+            step = cfg.n_digits - 1
+            S_t = S_seq[step]
+            input_ids = board_to_input_tensor(S_t)
+
+            with torch.no_grad():
+                logits, attn_layers = model(input_ids, return_attn=True)
+
+            result_idx, carry_idx = query_indices_for_step(cfg, step)
+
+            if result_idx is not None:
+                title = f"relative_pe | subtraction | {ex_name} | heads={n_heads} | step={step} | query=result"
+                out_path = os.path.join(
+                    OUTPUT_DIR, f"attn_sub_relative_{n_heads}h_{ex_name}_step{step}_result.png"
+                )
+                plot_attention_grid(attn_layers, cfg, result_idx, title, out_path)
+
+            if carry_idx is not None:
+                title = f"relative_pe | subtraction | {ex_name} | heads={n_heads} | step={step} | query=carry"
+                out_path = os.path.join(
+                    OUTPUT_DIR, f"attn_sub_relative_{n_heads}h_{ex_name}_step{step}_carry.png"
+                )
+                plot_attention_grid(attn_layers, cfg, carry_idx, title, out_path)
 
 
 def plot_heads_vs_accuracy(val_acc_per_heads: Dict[int, float]) -> None:
@@ -586,53 +704,30 @@ def plot_heads_vs_accuracy(val_acc_per_heads: Dict[int, float]) -> None:
     plt.figure(figsize=(5, 4))
     plt.plot(heads, accs, marker="o")
     plt.xlabel("Number of heads")
-    plt.ylabel("Validation accuracy (multi-addition)")
-    plt.title("Effect of number of heads on multi-addition accuracy")
+    plt.ylabel("Validation accuracy (subtraction transfer)")
+    plt.title("Effect of number of heads on subtraction transfer accuracy")
     plt.xticks(heads)
     plt.ylim(0.0, 1.0)
     out_path = os.path.join(
         CHECKPOINT_DIR,
-        "multi_add_heads_vs_val_acc.png",
+        "subtraction_heads_vs_val_acc.png",
     )
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
-    print(f"Saved heads vs accuracy plot to {out_path}")
+    print(f"Saved subtraction heads vs accuracy plot to {out_path}")
 
 
 def main():
-    cfg_add_large = BoardConfig(
-        H=5,
-        W=7,
-        n_digits=3,
-        n_addends=2,
-        carry_row=0,
-        top_row=1,
-        bottom_row=2,
-        result_row=4,
-    )
+    cfg = BoardConfig(H=4, W=5, n_digits=3)
 
-    cfg_multi = BoardConfig(
-        H=5,
-        W=7,
-        n_digits=5,
-        n_addends=3,
-        carry_row=0,
-        top_row=1,
-        bottom_row=3,
-        result_row=4,
-    )
+    TRAIN_BASE_ADDITION = False
+    FINETUNE_SUBTRACTION = True
 
-    TRAIN_BASE = True
-    FINETUNE_MULTI = True
-
-    _ = train_or_load_largegrid_addition_models(TRAIN_BASE, cfg_add_large)
-    _, val_acc_per_heads = train_or_load_multiaddition_from_largegrid(
-        FINETUNE_MULTI,
-        cfg_add_large,
-        cfg_multi,
-    )
+    train_or_load_addition_models(TRAIN_BASE_ADDITION, cfg)
+    models, val_acc_per_heads = train_or_load_subtraction_models(FINETUNE_SUBTRACTION, cfg)
     plot_heads_vs_accuracy(val_acc_per_heads)
+    visualize_attention(models, cfg)
 
 
 if __name__ == "__main__":
