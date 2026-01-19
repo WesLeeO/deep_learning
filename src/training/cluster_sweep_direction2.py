@@ -87,14 +87,20 @@ def make_pes(model_cfg: ModelConfig, board_cfg: BoardConfig):
             "abs_1d_learned",
             LearnedPositionalEncoding1D(model_cfg.d_model, board_cfg.H * board_cfg.W),
         ),
+        ("abs_1d_sinusoidal",
+         SinusoidalPositionalEncoding(model_cfg.d_model, model_cfg.max_len)),
         (
             "abs_2d_learned",
             LearnedPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W),
         ),
+        ("abs_2d_sinusoidal",
+         SinusoidalPositionalEncoding2D(model_cfg.d_model, board_cfg.H, board_cfg.W)),
         (
             "rel_2d_bias",
             RelativePositionBias2D(model_cfg.nhead, board_cfg.H, board_cfg.W),
         ),
+        
+
     ]
 
 
@@ -612,11 +618,14 @@ def main():
 
     # model configs (same as blackboard.py)
     model_cfgs = [
-      #  ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
-      #  ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
+        ModelConfig(d_model=64,  nhead=1, num_layers=2, dim_feedforward=256, dropout=0.1, max_len=200),
+        ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
         ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
-      #  ModelConfig(d_model=512, nhead=4, num_layers=6, dim_feedforward=512, dropout=0.1, max_len=200),
+        ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
     ]
+        # ModelConfig(d_model=128, nhead=2, num_layers=3, dim_feedforward=512, dropout=0.1, max_len=200),
+        # ModelConfig(d_model=256, nhead=4, num_layers=4, dim_feedforward=512, dropout=0.1, max_len=200),
+        # ModelConfig(d_model=256, nhead=8, num_layers=6, dim_feedforward=1024, dropout=0.1, max_len=200),
 
     def stable_seed(tag: str) -> int:
         # stable across machines/runs (unlike Python's hash())
@@ -658,6 +667,7 @@ def main():
             rows = []
 
             for pe_name, _ in pe_list:
+                print(f"\n>>> PE: {pe_name}")
                 # we'll re-instantiate fresh PE modules each time (safer than sharing modules across trainings)
                 # ---- CLASSIC (vocab=12) ----
                 pe_c = dict(make_pes(model_cfg, board_cfg))[pe_name]
